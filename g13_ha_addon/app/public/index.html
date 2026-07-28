@@ -1955,7 +1955,36 @@ async function autoSyncGrowattFromHA(){
     }
     const csvText = await resp.text();
 
-    monthKeysBetween(start, end).forEach(function(mk){
+    // Sprawdzamy, które miesiące FAKTYCZNIE mają dane w odpowiedzi, zamiast
+    // z góry zerować cały zapytany zakres. Ważne z dwóch powodów:
+    // 1) jeśli entity_id się nie zgadzają (błędna konfiguracja), CSV wraca
+    //    z samym nagłówkiem - bez tej sprawdzania zerowalibyśmy dobre dane
+    //    "dokładne (HA)" fałszywym zerem zamiast zostawić je bez zmian;
+    //    dodatkowo taki błąd trzeba było zauważyć wizualnie na wykresie,
+    //    zamiast dostać czytelny komunikat od razu.
+    // 2) miesiące sprzed instalacji growatt_modbus nie mają i nie powinny
+    //    mieć danych HA - nie ruszamy ich, zamiast wpisywać im zero.
+    const rows = parseCsvText(csvText);
+    const header = (rows[0]||[]).map(normalizeHeader);
+    const idIdx = header.indexOf('statisticid');
+    const csvStartIdx = header.indexOf('start');
+    const monthsWithData = new Set();
+    if (idIdx !== -1 && csvStartIdx !== -1){
+      for (let i = 1; i < rows.length; i++){
+        const row = rows[i];
+        if (!row || !row[idIdx] || !classifyGrowattHaSensor(row[idIdx])) continue;
+        const d = parseDateFlexible(row[csvStartIdx]);
+        if (d) monthsWithData.add(d.slice(0,7));
+      }
+    }
+
+    if (monthsWithData.size === 0){
+      log('Synchronizacja z HA nie zwróciła żadnych danych dla skonfigurowanych encji Growatt (zakres ' + startStr + ' – ' + endStr + '). Nic nie nadpisałem — sprawdź dokładne nazwy encji w Developer Tools → States i porównaj z opcją growatt_entities dodatku, oraz log dodatku (Ustawienia → Dodatki → G13 Depozyt → Log).', 'error');
+      if (statusEl) statusEl.textContent = 'Brak danych z HA dla skonfigurowanych encji — sprawdź log.';
+      return;
+    }
+
+    monthsWithData.forEach(function(mk){
       if (state.months[mk]){
         state.months[mk].haProdukcja = 0;
         state.months[mk].haOddanie = 0;
@@ -1997,4 +2026,4 @@ loadState().then(function(){
 })();
 </script>
 </body>
-  </html>
+</html>
