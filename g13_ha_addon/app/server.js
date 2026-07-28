@@ -90,6 +90,19 @@ app.get('/api/growatt/ha-stats.csv', async (req, res) => {
     const start = req.query.start ? new Date(req.query.start) : monthsAgo(options.history_months_back);
     const end = req.query.end ? new Date(req.query.end) : new Date();
     const result = await haWs.fetchStatistics(options.growatt_entities, start, end);
+
+    // Diagnostyka: dla każdej skonfigurowanej encji pokazujemy ile okresów
+    // faktycznie wróciło z HA. Przy złym entity_id (literówka, inna nazwa
+    // niż w rzeczywistej instalacji growatt_modbus) będzie tu 0 - widoczne
+    // od razu w logu dodatku, bez zgadywania.
+    options.growatt_entities.forEach((id) => {
+      const count = (result[id] || []).length;
+      console.log(`[growatt] ${id}: ${count} okresów`);
+    });
+    if (Object.keys(result).length === 0) {
+      console.warn('[growatt] HA nie zwrócił ŻADNEJ ze skonfigurowanych encji - sprawdź growatt_entities w opcjach dodatku vs. Developer Tools → States.');
+    }
+
     const csv = statisticsToCsv(result);
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.send(csv);
