@@ -103,7 +103,17 @@ app.get('/api/growatt/ha-stats.csv', async (req, res) => {
       console.warn('[growatt] HA nie zwrócił ŻADNEJ ze skonfigurowanych encji - sprawdź growatt_entities w opcjach dodatku vs. Developer Tools → States.');
     }
 
+    // Głębsza diagnostyka: samo "ile okresów" nie mówi, czy w środku są
+    // faktyczne liczby (sum/change) czy null - pokazujemy surową próbkę
+    // 3 ostatnich okresów pierwszej encji dokładnie tak, jak przyszły z HA.
+    const firstId = options.growatt_entities[0];
+    const samplePeriods = (result[firstId] || []).slice(-3);
+    console.log(`[growatt] próbka surowych okresów dla ${firstId}:`, JSON.stringify(samplePeriods));
+
     const csv = statisticsToCsv(result);
+    const csvLines = csv.split('\n').filter(Boolean);
+    console.log(`[growatt] CSV: ${csvLines.length - 1} wierszy danych (bez nagłówka). Próbka:`, csvLines.slice(0, 4).join(' | '));
+
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.send(csv);
   } catch (err) {
