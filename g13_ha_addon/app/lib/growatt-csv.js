@@ -13,7 +13,13 @@ const WARSAW_FORMATTER = new Intl.DateTimeFormat('en-CA', {
 });
 
 function toWarsawString(rawStart) {
-  const d = typeof rawStart === 'number' ? new Date(rawStart * 1000) : new Date(rawStart);
+  // HA WS API (recorder/statistics_during_period) zwraca start/end jako
+  // milisekundy od epoki (ten sam format co JS Date.now()) - NIE sekundy.
+  // Potwierdzone na żywych danych: surowa wartość ~1.79e12 odpowiada
+  // lipcowi 2026 jako milisekundy; jako sekundy (błędne *1000) wychodził
+  // rok ~58000, co tłumaczyło odrzucanie wszystkich wierszy przy parsowaniu
+  // dat po stronie frontendu.
+  const d = new Date(rawStart);
   const parts = WARSAW_FORMATTER.formatToParts(d).reduce((acc, p) => { acc[p.type] = p.value; return acc; }, {});
   return `${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute}:${parts.second}`;
 }
