@@ -1,6 +1,6 @@
 # G13 Depozyt — dodatek Home Assistant
 
-## Co się zmieniło względem wersji jako artefakt Claude.ai
+## Co się zmieniło 
 
 1. **Trwałość danych.** `window.storage` (działał tylko w artefakcie Claude.ai)
    zastąpiony plikiem `/data/kv-store.json`, persystowanym przez Supervisor
