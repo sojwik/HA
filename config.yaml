@@ -1,0 +1,33 @@
+name: "G13 Depozyt Prosumencki"
+version: "0.1.0"
+slug: "g13_depozyt_calc"
+description: "Kalkulator depozytu prosumenckiego TAURON G13 z automatycznym pobieraniem danych Growatt z Home Assistant (bez ręcznego eksportu/importu plików)."
+arch:
+  - amd64
+  - aarch64
+  - armv7
+init: false
+startup: application
+boot: auto
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:solar-power
+panel_title: "G13 Depozyt"
+homeassistant_api: true
+map:
+  - data:rw
+options:
+  growatt_entities:
+    - "sensor.growatt_solar_energy_total"
+    - "sensor.growatt_grid_energy_to_grid_total"
+    - "sensor.growatt_grid_grid_import_energy_total"
+    - "sensor.growatt_load_load_energy_total"
+    - "sensor.growatt_battery_battery_charge_total"
+    - "sensor.growatt_battery_battery_discharge_total"
+  history_months_back: 24
+  refresh_interval_minutes: 60
+schema:
+  growatt_entities:
+    - "str"
+  history_months_back: "int(1,120)"
+  refresh_interval_minutes: "int(5,1440)"
