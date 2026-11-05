@@ -45,7 +45,7 @@ function monthsAgo(n) {
 }
 
 const app = express();
-app.use(express.json({ limit: '2mb' }));
+app.use(express.json({ limit: '10mb' })); // cache cen RCE rośnie z czasem
 
 // ---------- KV: zamiennik window.storage (get/set/delete/list) ----------
 app.get('/api/kv/:key', (req, res) => {
@@ -91,28 +91,16 @@ app.get('/api/growatt/ha-stats.csv', async (req, res) => {
     const end = req.query.end ? new Date(req.query.end) : new Date();
     const result = await haWs.fetchStatistics(options.growatt_entities, start, end);
 
-    // Diagnostyka: dla każdej skonfigurowanej encji pokazujemy ile okresów
-    // faktycznie wróciło z HA. Przy złym entity_id (literówka, inna nazwa
-    // niż w rzeczywistej instalacji growatt_modbus) będzie tu 0 - widoczne
-    // od razu w logu dodatku, bez zgadywania.
-    options.growatt_entities.forEach((id) => {
-      const count = (result[id] || []).length;
-      console.log(`[growatt] ${id}: ${count} okresów`);
-    });
-    if (Object.keys(result).length === 0) {
-      console.warn('[growatt] HA nie zwrócił ŻADNEJ ze skonfigurowanych encji - sprawdź growatt_entities w opcjach dodatku vs. Developer Tools → States.');
+    // Diagnostyka: jedna zwięzła linia + ostrzeżenie, gdy któraś skonfigurowana
+    // encja nie zwróciła żadnych okresów (błędne entity_id / brak statystyk).
+    const counts = options.growatt_entities.map((id) => [id, (result[id] || []).length]);
+    const empty = counts.filter(([, n]) => n === 0).map(([id]) => id);
+    console.log(`[growatt] okresów na encję: ${counts.map(([id, n]) => id.replace('sensor.growatt_', '') + '=' + n).join(', ')}`);
+    if (empty.length) {
+      console.warn(`[growatt] UWAGA: brak danych dla: ${empty.join(', ')} — sprawdź entity_id w opcjach dodatku vs. Developer Tools → States.`);
     }
 
-    // Głębsza diagnostyka: samo "ile okresów" nie mówi, czy w środku są
-    // faktyczne liczby (sum/change) czy null - pokazujemy surową próbkę
-    // 3 ostatnich okresów pierwszej encji dokładnie tak, jak przyszły z HA.
-    const firstId = options.growatt_entities[0];
-    const samplePeriods = (result[firstId] || []).slice(-3);
-    console.log(`[growatt] próbka surowych okresów dla ${firstId}:`, JSON.stringify(samplePeriods));
-
     const csv = statisticsToCsv(result);
-    const csvLines = csv.split('\n').filter(Boolean);
-    console.log(`[growatt] CSV: ${csvLines.length - 1} wierszy danych (bez nagłówka). Próbka:`, csvLines.slice(0, 4).join(' | '));
 
     res.set('Content-Type', 'text/csv; charset=utf-8');
     res.send(csv);
