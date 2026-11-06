@@ -126,6 +126,21 @@ function waitForServer(timeoutMs) {
   t('S25 limitsKw w konfiguracji', r.json && r.json.limitsKw && r.json.limitsKw.poborHa === 16.0);
   t('S26 pojemność baterii', r.json && r.json.batteryCapacityKwh === 16.35);
 
+  console.log('\n=== CSP musi dopuszczać hosta, którego używa frontend ===');
+  // Regresja: CSP miało api.pse.pl, a frontend api.raporty.pse.pl. Przeglądarka
+  // blokowała natychmiast, więc wszystkie 31 dni RCE padały w tej samej sekundzie.
+  const frontHtml = fs.readFileSync(path.join(__dirname, '../app/public/index.html'), 'utf8');
+  const apiMatch = frontHtml.match(/PSE_API_BASE\s*=\s*['"](https?:\/\/[^/'"]+)/);
+  t('S28 frontend ma jawnie zadeklarowany host API PSE', !!apiMatch);
+  if (apiMatch) {
+    const host = apiMatch[1];
+    const cspHeader = (await req('GET', '/')).headers.get('content-security-policy') || '';
+    const connectSrc = (cspHeader.match(/connect-src[^;]*/) || [''])[0];
+    t('S29 CSP connect-src zawiera host API używany przez frontend',
+      connectSrc.includes(host),
+      'host: ' + host + '\nconnect-src: ' + connectSrc);
+  }
+
   console.log('\n=== Graceful shutdown (SIGTERM) ===');
   if (process.platform === 'win32') {
     // Windows nie dostarcza SIGTERM do handlerów procesu — Node zabija proces

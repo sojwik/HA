@@ -89,7 +89,11 @@ app.use((req, res, next) => {
     "script-src 'self' 'unsafe-inline'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
-    "connect-src 'self' https://api.pse.pl",
+    // Host musi się zgadzać z PSE_API_BASE w public/index.html. Wcześniej było
+    // tu api.pse.pl, a frontend pyta api.raporty.pse.pl — CSP blokowało każde
+    // żądanie natychmiast ("Failed to fetch"), bez wyjścia do sieci.
+    // Test S28 wymusza zgodność, żeby te dwie wartości znów się nie rozeszły.
+    "connect-src 'self' https://api.raporty.pse.pl https://api.pse.pl",
     "frame-ancestors 'self' http://homeassistant.local:* https://*.ui.nabu.casa",
     "base-uri 'self'",
     "form-action 'self'",
