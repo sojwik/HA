@@ -7,7 +7,12 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- SheetJS vendored lokalnie: 0.18.5 z CDN miało CVE-2023-30533 (prototype
+     pollution) i CVE-2024-22363 (ReDoS). Brak integrity= oznaczał, że
+     podmiana pliku na CDN wstrzyknęłaby kod do aplikacji z dostępem do
+     tokenów HA. Plik lokalny, wersja 0.20.3. -->
+<script src="vendor/xlsx.full.min.js"></script>
+<script src="validate.js"></script>
 <style>
   :root{
     --bg:#14181d; --surface:#1b2129; --surface-alt:#232b34; --inset:#0b0e12;
@@ -360,11 +365,19 @@
 
   <section class="panel" style="margin-bottom:1.25rem;">
     <h2>Stawka zwrotu niewykorzystanych środków</h2>
-    <p class="hint">Do 30% wartości depozytu miesięcznego (rozliczanie RCE, zasada od lutego 2025) albo do 20% (RCEm). Edytowalne, bo zasady bywają aktualizowane.</p>
+    <p class="hint">Rozliczenie godzinowe RCE → limit <strong>30%</strong> (art. 4 ust. 11a pkt 2). RCEm → 20%. Limit dotyczy wartości energii wprowadzonej w miesiącu, <em>którego dotyczy zwrot</em> — nie całego salda konta.</p>
     <div class="roi-input-row">
       <label for="inputRefundRate">Stawka zwrotu [%]</label>
       <input type="number" id="inputRefundRate" step="1" min="0" max="100" placeholder="30">
     </div>
+    <div class="roi-input-row">
+      <label for="inputRefundCapBasis">Podstawa naliczenia limitu</label>
+      <select id="inputRefundCapBasis">
+        <option value="base">wartość energii wprowadzonej (przed ×1,23) — literalny przepis</option>
+        <option value="deposit">depozyt po ×1,23 — interpretacja spotykana u sprzedawców</option>
+      </select>
+    </div>
+    <p class="hint" style="margin-top:.5rem;">Przepis mówi „30% <em>wartości energii elektrycznej wprowadzonej do sieci</em>”, a depozyt jest tą wartością powiększoną o 23% — więc literalnie limit to 24,39% depozytu. Część sprzedawców liczy 30% wprost od depozytu. Dla lipca 2026 (depozyt 258,62 zł): <strong>63,08 zł</strong> vs <strong>77,59 zł</strong>, różnica 23%. Rozstrzygnie to pierwsza faktura zwrotu — do tego czasu traktuj tę kwotę jako widełki.</p>
   </section>
 
   <section class="panel">
@@ -414,6 +427,8 @@
     <span class="readout-sub" id="readoutRealBatterySub">brak danych z Home Assistant</span>
   </div>
 
+  <div id="haDiagnostics"></div>
+
   <section class="panel" style="margin-bottom:1.25rem;">
     <h2>Rzeczywista wydajność magazynu (z danych Home Assistant)</h2>
     <p class="hint">Koszt magazynu wpisujesz raz, w sekcji „Parametry" niżej — używany jest tu i tam, bo to ten sam fizyczny magazyn.</p>
@@ -422,16 +437,18 @@
         <thead>
           <tr>
             <th>Miesiąc</th>
-            <th>Naładowano</th>
-            <th>Rozładowano</th>
-            <th>Wartość zaoszczędzona</th>
+            <th>Naładowano [kWh]</th>
+            <th>Rozładowano [kWh]</th>
+            <th title="Energia kupiona z sieci do naładowania baterii">Z sieci [kWh]</th>
+            <th title="Koszt energii kupionej do baterii">Koszt zakupu</th>
+            <th title="Wartość rozładowania minus koszt zakupu">Zysk netto</th>
           </tr>
         </thead>
         <tbody id="realBatteryBody"></tbody>
         <tfoot id="realBatteryFoot"></tfoot>
       </table>
     </div>
-    <p class="hint" style="margin-top:.6rem;">Wartość = rozładowanie × Twoja efektywna stawka (koszt energii ÷ pobór, z zakładki Analiza) — to realna kwota, którą magazyn oszczędził Ci na zakupie z sieci, licząc z prawdziwego zużycia domu, nie z symulacji.</p>
+    <p class="hint" style="margin-top:.6rem;">Zysk netto = rozładowanie × stawka − energia kupiona z sieci × stawka. Samo rozładowanie nie jest oszczędnością, jeśli bateria była ładowana z sieci. Kolumna „Z sieci” to szacunek (ładowanie przy zerowej produkcji AC) — nie widzi ładowania z sieci przy jednoczesnej produkcji PV, więc rzeczywisty koszt może być wyższy. Miesiące z niemożliwym bilansem magazynu są oznaczone na czerwono.</p>
   </section>
 
   <div class="readout-card" style="text-align:left; margin-bottom:1.5rem;">
@@ -570,17 +587,26 @@ window.storage = {
 'use strict';
 
 /* ============================== STATE ============================== */
+// Walidator współdzielony z backendem (app/lib/validate.js).
+const V = window.G13Validate;
+let validateCfg = V.resolveConfig();
+let haSyncInFlight = false;   // S3: nakładające się synchronizacje dublowały dane
 const state = {
   hourlyElicznik: {},  // 'YYYY-MM-DD_HH' -> {date,hour,oddaniePoZbil,poborPoZbil}
   rceHourly: {},        // 'YYYY-MM-DD_HH' -> averaged PLN/MWh
   months: {},            // 'YYYY-MM' -> {kwh,przypis,kosztEnergii,kosztDystrybucji,manual,missingHours}
   kosztInwestycji: 0,    // jednorazowy koszt instalacji PV, do panelu Analiza (ROI)
   manualRatePlnKwh: null, // zapasowa stawka PLN/kWh, gdy nie da się jej wyliczyć z Depozytu
-  refundRate: 0.30,       // stawka zwrotu niewykorzystanych środków (domyślnie 30% dla rozliczania RCE)
+  refundRate: 0.30,       // 30% — rozliczenie godzinowe RCE potwierdzone przez użytkownika
+  refundCapBasis: 'base', // 'base' = 30% od wartości energii wprowadzonej (literalny art. 4 ust. 11a pkt 2);
+                          // 'deposit' = 30% od depozytu po ×1,23. Różnica 23%. Patrz refundCap() w validate.js.
   batCapacityKwh: null,   // pojemność magazynu do symulacji (zakładka Magazyn)
   batEfficiency: 0.90,    // sprawność cyklu magazynu
   batCostPln: 0,          // koszt Twojego magazynu — używane zarówno w symulacji hipotetycznej jak i w realnej wydajności
-  zoneRates: {}           // stawki PLN/kWh per strefa (T1/T2/T3...), nazwy dynamiczne z danych
+  zoneRates: {},          // stawki PLN/kWh per strefa (T1/T2/T3...), nazwy dynamiczne z danych
+  haRejected: {},         // 'YYYY-MM' -> podsumowanie odrzuconych godzin (widoczne w UI)
+  haBatteryCheck: {},     // 'YYYY-MM' -> wynik testu rozstępu SOC
+  haHourly: {}            // 'YYYY-MM' -> [{ts,ladowanie,rozladowanie}] do walidacji miesięcznej
 };
 let rceBuffer = {};
 let apiSampleLogged = false;
@@ -603,10 +629,10 @@ function log(msg, level){
 function round2(n){ return Math.round((n + Number.EPSILON) * 100) / 100; }
 
 function parsePlNumber(str){
-  if (typeof str === 'number') return str;
-  if (str === null || str === undefined) return NaN;
-  const cleaned = String(str).trim().replace(/\s/g,'').replace(',', '.');
-  return parseFloat(cleaned);
+  // T3: było .replace(',','.') → '1.234,56' stawało się '1.234.56',
+  // a parseFloat zwracał 1.234 (cicho, 1000× za mało). Teraz poprawnie
+  // rozróżniamy separator tysięcy od dziesiętnego.
+  return V.parsePlNumber(str);
 }
 
 function formatPLN(n){
@@ -904,26 +930,31 @@ async function handleRceFiles(fileList){
 
 /* ============================== RCE API (PSE) ============================== */
 function allHoursCoveredForDate(dateStr){
+  // T5/T12: było sztywne 24. W dniu 23-godzinnym (29.03.2026) warunek nigdy
+  // nie był spełniony → pętla pobierania RCE w nieskończoność ponawiała ten
+  // dzień. W dniu 25-godzinnym (25.10.2026) uznawała dzień za pełny po 24 h.
+  // Liczymy faktyczną liczbę godzin i sprawdzamy przez klucze UTC.
+  const expected = V.expectedHoursInDay(dateStr);
+  let found = 0;
+  for (const k in state.rceHourly){
+    const rec = state.rceHourly[k];
+    const d = (typeof rec === 'object' && rec !== null && rec.date) ? rec.date : k.slice(0,10);
+    if (d === dateStr) found++;
+  }
+  if (found >= expected) return true;
+  // zgodność wstecz: stary format klucza 'data_HH' bez pola date
   for (let h = 0; h < 24; h++){
     if (state.rceHourly[dateStr + '_' + String(h).padStart(2,'0')] === undefined) return false;
   }
-  return true;
+  return expected <= 24;
 }
 
 function extractHourFromApiRecord(rec){
-  const timeField = rec.dtime || rec.udtczas_oreb || rec.doba || rec.udtczas || null;
-  if (timeField){
-    const m = String(timeField).match(/(\d{1,2}):(\d{2})/);
-    if (m) return parseInt(m[1],10);
-  }
-  if (rec.period !== undefined && rec.period !== null){
-    const periodStr = String(rec.period);
-    const rangeMatch = periodStr.match(/^(\d{1,2}):(\d{2})/); // real API shape: "00:00 - 00:15"
-    if (rangeMatch) return parseInt(rangeMatch[1], 10);
-    const p = parseInt(periodStr, 10);
-    if (!isNaN(p)) return Math.floor((p-1)/4); // fallback: plain 1-96 slot index
-  }
-  return null;
+  // P0-2: PSE podaje `dtime` jako KONIEC interwału, nie początek.
+  // Branie godziny z dtime przesuwało WSZYSTKIE ceny o jedną godzinę.
+  // Na realnym lipcu 2026: depozyt 254,09 zł zamiast 258,62 zł (−4,53 zł, −1,75%).
+  // Priorytet ma `period` („00:00 - 00:15"), bo jawnie podaje początek.
+  return V.rceHourFromRecord(rec);
 }
 function extractPriceFromApiRecord(rec){
   const raw = rec.rce_pln !== undefined ? rec.rce_pln : rec.RCE_PLN;
@@ -982,9 +1013,11 @@ async function fetchRceFromApi(){
 }
 
 /* ============================== CALCULATION ENGINE ============================== */
-function hourlyDepositValue(kwh, rcePlnMwh){
-  const priceKwh = Math.max(0, rcePlnMwh) / 1000;
-  return kwh * priceKwh * 1.23;
+function hourlyDepositValue(kwh, rcePlnMwh, monthKey){
+  // ×1,23 obowiązuje od 1.02.2025 (art. 4c ust. 4 ustawy o OZE).
+  // Wcześniej mnożnik 1,0 — bez tej bramki miesiące 2024 zawyżają o 23%.
+  // Ujemne RCE nie zmniejsza depozytu (art. 4c ust. 3) — stad Math.max(0,…).
+  return V.hourlyDepositValue(kwh, rcePlnMwh, monthKey);
 }
 
 function recomputeMonths(){
@@ -1004,7 +1037,7 @@ function recomputeMonths(){
       var rceKey = r.date + '_' + String(r.hour).padStart(2,'0');
       var price = state.rceHourly[rceKey];
       if (price === undefined){ missing++; }
-      else { kwh += r.oddaniePoZbil; przypis += hourlyDepositValue(r.oddaniePoZbil, price); }
+      else { kwh += r.oddaniePoZbil; przypis += hourlyDepositValue(r.oddaniePoZbil, price, mk2); }
       poborKwh += r.poborPoZbil;
       if (NIGHT_HOURS.indexOf(r.hour) !== -1){ nightSum += r.poborPoZbil; nightCount++; }
       var zoneKey = r.strefa || 'nieznana';
@@ -1121,6 +1154,7 @@ function render(){
   renderWygasanie();
   renderStrefy();
   renderRealBattery();
+  renderHaDiagnostics();
 }
 
 /* ============================== GROWATT PRZEZ HOME ASSISTANT (prawdziwe zużycie domu + bateria) ============================== */
@@ -1136,34 +1170,252 @@ function classifyGrowattHaSensor(id){
   return map[id] || null;
 }
 
+/* Parser eksportu HA z walidacją fizyczną.
+ *
+ * ZWRACA {monthly, hourly, rejected} — nie samą mapę miesięcy.
+ *
+ * Dlaczego filtr jest konieczny (dane rzeczywiste, 5222 h × 6 sensorów):
+ *   - 188 ujemnych delt poboru; w kwietniu 86 h sumujących się do −153,6 kWh,
+ *     co KASOWAŁO dodatnie delty i zaniżało pobór miesiąca ze 194,8 do 41,2 kWh
+ *     (≈123–154 zł zaniżonego kosztu przy 0,80–1,00 zł/kWh);
+ *   - 3 skoki lipca: +1286,5 / +376,8 / +1293,0 kWh = 2956,3 kWh fałszu,
+ *     przez co autokonsumpcja wychodziła −2404 kWh i była uciszana do zera;
+ *   - 42,2 kWh produkcji w jedną godzinę 15.04 przy falowniku 13,2 kW.
+ *
+ * Próg SKALUJE SIĘ długością okna: po luce w komunikacji delta obejmuje wiele
+ * godzin. Sztywny próg godzinowy odrzucał poprawny pomiar 30,2 kWh zużycia
+ * w oknie 20 h (1,51 kW średnio).
+ */
 function parseHaStatisticsCsv(rows, sourceLabel){
   const header = (rows[0]||[]).map(normalizeHeader);
   const idIdx = header.indexOf('statisticid');
   const startIdx = header.indexOf('start');
+  const utcIdx = header.indexOf('startutc');     // nowa kolumna z backendu
   const deltaIdx = header.indexOf('delta');
+  const sumIdx = header.indexOf('sum');
   if (idIdx === -1 || startIdx === -1 || deltaIdx === -1){
     log(sourceLabel + ': nie rozpoznaję formatu eksportu HA statistics (brak kolumn statistic_id/start/delta).', 'warn');
-    return {};
+    return {monthly:{}, hourly:{}, rejected:{total:0, byRole:{}, overLimitSamples:[], negativeSamples:[]}};
   }
-  const monthly = {};
-  let matchedRows = 0;
+
+  // 1) zbierz surowe wiersze per rola
+  const perRole = {};
+  let skipped = 0;
   for (let i = 1; i < rows.length; i++){
     const row = rows[i];
     if (!row || !row[idIdx]) continue;
     const role = classifyGrowattHaSensor(row[idIdx]);
     if (!role) continue;
-    const dateStr = parseDateFlexible(row[startIdx]);
-    const hourObj = extractHour(row[startIdx]);
-    if (!dateStr || hourObj === null) continue;
     const delta = parsePlNumber(row[deltaIdx]);
-    if (isNaN(delta)) continue;
-    const mk = dateStr.slice(0,7);
-    if (!monthly[mk]) monthly[mk] = {produkcja:0, oddanieHa:0, poborHa:0, zuzycieDomu:0, ladowanie:0, rozladowanie:0};
-    monthly[mk][role] += delta;
-    matchedRows++;
+    if (isNaN(delta)){ skipped++; continue; }
+
+    let ts = null;
+    if (utcIdx !== -1 && row[utcIdx]){
+      const t = Date.parse(row[utcIdx]);
+      if (isFinite(t)) ts = t;
+    }
+    if (ts === null){
+      // Eksport ręczny nie ma kolumny UTC — składamy z czasu lokalnego.
+      const dateStr = parseDateFlexible(row[startIdx]);
+      const hourObj = extractHour(row[startIdx]);
+      if (!dateStr || hourObj === null){ skipped++; continue; }
+      const hh = String(hourObj.value).padStart(2,'0');
+      // Próbujemy obu offsetów; wybieramy ten, którego etykieta lokalna
+      // zgadza się z wejściem (rozstrzyga dwuznaczność przy zmianie czasu).
+      for (const off of ['+02:00','+01:00']){
+        const t = Date.parse(dateStr + 'T' + hh + ':00:00' + off);
+        if (!isFinite(t)) continue;
+        const lab = V.localHourLabel(t);
+        if (lab.date === dateStr && lab.hour === hourObj.value){ ts = t; break; }
+      }
+      if (ts === null) ts = Date.parse(dateStr + 'T' + hh + ':00:00+02:00');
+    }
+    if (!isFinite(ts)){ skipped++; continue; }
+    const sum = sumIdx !== -1 ? parsePlNumber(row[sumIdx]) : NaN;
+    (perRole[role] = perRole[role] || []).push({ts:ts, delta:delta, sum:sum});
   }
-  log(sourceLabel + ': przetworzono ' + matchedRows + ' godzinowych wpisów z rozpoznanych sensorów Growatt (spośród wszystkich w pliku).', matchedRows ? 'success' : 'warn');
-  return monthly;
+
+  // 2) sortuj i rozstrzygnij duplikaty DST
+  //    25.10.2026 02:00 występuje dwa razy z różnymi sumami. Bez kolumny UTC
+  //    oba wiersze dostają ten sam timestamp — druga godzina nadpisywałaby
+  //    pierwszą. Sortujemy po (ts, sum) i przesuwamy duplikat o godzinę.
+  let dstFixed = 0;
+  for (const role in perRole){
+    perRole[role].sort(function(a,b){
+      if (a.ts !== b.ts) return a.ts - b.ts;
+      const sa = isFinite(a.sum) ? a.sum : -Infinity;
+      const sb = isFinite(b.sum) ? b.sum : -Infinity;
+      return sa - sb;
+    });
+    const seen = new Set();
+    for (const r of perRole[role]){
+      while (seen.has(r.ts)){ r.ts += 3600000; dstFixed++; }
+      seen.add(r.ts);
+    }
+    perRole[role].sort(function(a,b){ return a.ts - b.ts; });
+  }
+  if (dstFixed > 0){
+    log(sourceLabel + ': rozdzielono ' + dstFixed + ' zduplikowanych godzin (zmiana czasu) — bez tego druga godzina 02:00 nadpisywałaby pierwszą.', 'warn');
+  }
+
+  // 3) filtr fizyczny świadomy długości okna
+  const rej = V.createRejectionLog();
+  const monthly = {};
+  const hourlyByMonth = {};
+  const roleToHourField = {produkcja:'produkcja', oddanieHa:'oddanieHa', poborHa:'poborHa',
+                           zuzycieDomu:'zuzycieDomu', ladowanie:'ladowanie', rozladowanie:'rozladowanie'};
+  let accepted = 0;
+
+  for (const role in perRole){
+    const list = perRole[role];
+    for (let i = 0; i < list.length; i++){
+      const prevTs = i > 0 ? list[i-1].ts : null;
+      const verdict = V.acceptDelta(role, list[i].delta, prevTs, list[i].ts, validateCfg);
+      const mk = V.monthKeyFromUtc(list[i].ts);
+      if (!verdict.ok){
+        rej.add(role, list[i].ts, list[i].delta, verdict);
+        continue;
+      }
+      accepted++;
+      if (!monthly[mk]) monthly[mk] = {produkcja:0, oddanieHa:0, poborHa:0, zuzycieDomu:0, ladowanie:0, rozladowanie:0};
+      monthly[mk][role] += list[i].delta;
+      if (roleToHourField[role]){
+        if (!hourlyByMonth[mk]) hourlyByMonth[mk] = {};
+        const h = (hourlyByMonth[mk][list[i].ts] = hourlyByMonth[mk][list[i].ts]
+          || {ts:list[i].ts, produkcja:0, oddanieHa:0, poborHa:0, zuzycieDomu:0, ladowanie:0, rozladowanie:0});
+        h[roleToHourField[role]] += list[i].delta;
+      }
+    }
+  }
+
+  const summary = rej.summary();
+  // 4) komunikaty — odrzucenia muszą być WIDOCZNE
+  if (summary.total > 0){
+    log(sourceLabel + ': ODRZUCONO ' + summary.total + ' godzin jako fizycznie niemożliwych ('
+        + summary.rejectedKwh.toFixed(1) + ' kWh). Przyjęto ' + accepted + '.', 'error');
+    for (const role in summary.byRole){
+      const b = summary.byRole[role];
+      log('  ' + role + ': ' + b.count + ' h (ujemne ' + b.negative + ', ponad próg ' + b.overLimit + ')', 'warn');
+    }
+    summary.overLimitSamples.slice(0,10).forEach(function(s){
+      log('  ' + new Date(s.ts).toLocaleString('pl-PL') + '  ' + s.role + '  ' + s.delta.toFixed(1) + ' kWh — ' + s.reason, 'warn');
+    });
+    log('  Te godziny NIE weszły do sum. Napraw historię w HA: Narzędzia deweloperskie → Statystyki → „Adjust sum”.', 'warn');
+  } else {
+    log(sourceLabel + ': przyjęto wszystkie ' + accepted + ' godzinowych wpisów — brak wartości fizycznie niemożliwych.', 'success');
+  }
+  if (skipped > 0) log(sourceLabel + ': pominięto ' + skipped + ' wierszy bez parsowalnej daty lub wartości.', 'debug');
+
+  // 5) miesięczny test baterii — wykrywa błąd, którego filtr godzinowy nie widzi
+  const hourly = {};
+  for (const mk in hourlyByMonth){
+    hourly[mk] = Object.values(hourlyByMonth[mk]).sort(function(a,b){ return a.ts-b.ts; });
+  }
+  return {monthly:monthly, hourly:hourly, rejected:summary};
+}
+
+/* Szacunek energii kupionej z sieci do naładowania baterii.
+ *
+ * Metoda: godzina, w której produkcja AC ≈ 0, a bateria się ładuje — energia
+ * musi pochodzić z sieci. Na realnych danych: sierpień 0,0 kWh (0 godzin),
+ * wrzesień 62,5 kWh (16 h), październik 70,7 kWh (28 h), listopad 39,6 kWh.
+ *
+ * OGRANICZENIE: metoda nie widzi ładowania z sieci przy jednoczesnej produkcji
+ * PV. W październiku wykrywa 70,7 kWh, a do domknięcia bilansu przy η=0,92
+ * brakuje 167,3 kWh — czyli wykrywa tylko część. Dlatego wynik jest oznaczony
+ * jako `estimated` i opisany w UI jako szacunek, nie pomiar.
+ *
+ * Rozkład godzinowy wykrytego ładowania: noc (22–05) 80,4 kWh,
+ * dzień (06–21) 92,4 kWh — czyli to NIE jest wyłącznie arbitraż nocny.
+ */
+function estimateGridCharge(monthKey){
+  const hours = state.haHourly[monthKey];
+  if (!hours || !hours.length) return {kwh:0, hours:0, estimated:false, nightKwh:0, dayKwh:0};
+  let kwh = 0, n = 0, night = 0, day = 0;
+  for (const h of hours){
+    if (h.produkcja <= 0.01 && h.ladowanie > 0.05){
+      kwh += h.ladowanie; n++;
+      const localHour = V.localHourLabel(h.ts).hour;
+      if (localHour >= 22 || localHour <= 5) night += h.ladowanie;
+      else day += h.ladowanie;
+    }
+  }
+  return {kwh:round2(kwh), hours:n, estimated:true, nightKwh:round2(night), dayKwh:round2(day)};
+}
+
+/* Panel odrzuceń — odrzucone godziny muszą być widoczne, nie ciche. */
+function renderHaDiagnostics(){
+  const el = document.getElementById('haDiagnostics');
+  if (!el) return;
+  const months = Object.keys(state.haRejected).sort();
+  const badBattery = Object.keys(state.haBatteryCheck).filter(function(k){
+    return !state.haBatteryCheck[k].plausible;
+  }).sort();
+
+  if (!months.length && !badBattery.length){ el.innerHTML = ''; return; }
+
+  let html = '<div style="border:1px solid #7f1d1d;border-radius:8px;padding:.9rem;margin:.8rem 0;background:rgba(127,29,29,.08);">';
+  html += '<strong style="color:#f87171;">Wykryto problemy w danych z Home Assistant</strong>';
+
+  let totalRej = 0;
+  const rows = [];
+  months.forEach(function(mk){
+    const r = state.haRejected[mk];
+    if (!r || !r.total) return;
+    totalRej += r.total;
+    const parts = [];
+    for (const role in r.byRole){
+      const b = r.byRole[role];
+      parts.push(V.escapeHtml(role) + ': ' + b.count + ' h');
+    }
+    rows.push('<tr><td>' + V.escapeHtml(formatMonthLabel(mk)) + '</td><td class="num">'
+      + r.total + '</td><td class="num">' + formatKwh1(r.rejectedKwh)
+      + '</td><td>' + parts.join(', ') + '</td></tr>');
+  });
+
+  if (rows.length){
+    html += '<p class="hint" style="margin:.5rem 0;">Odrzucono ' + totalRej
+      + ' godzin jako fizycznie niemożliwych. Nie weszły do sum miesięcznych. '
+      + 'Napraw historię: Narzędzia deweloperskie → Statystyki → „Adjust sum”.</p>';
+    html += '<table style="width:100%;font-size:.85rem;"><thead><tr><th>Miesiąc</th>'
+      + '<th>Odrzucone h</th><th>Odrzucone kWh</th><th>Per licznik</th></tr></thead><tbody>'
+      + rows.join('') + '</tbody></table>';
+  }
+
+  if (badBattery.length){
+    html += '<p class="hint" style="margin:.7rem 0 .3rem;"><strong>Bilans magazynu niemożliwy</strong> '
+      + '— rozstęp stanu naładowania przekracza pojemność '
+      + validateCfg.batteryCapacityKwh.toFixed(2) + ' kWh:</p><ul style="margin:.2rem 0;font-size:.85rem;">';
+    badBattery.forEach(function(mk){
+      const b = state.haBatteryCheck[mk];
+      html += '<li>' + V.escapeHtml(formatMonthLabel(mk)) + ': rozstęp '
+        + b.socRange.toFixed(1) + ' kWh = <strong>' + b.ratio + '×</strong> pojemność'
+        + (b.hardImpossible ? ('; nadmiar ' + b.hardExcess.toFixed(1)
+            + ' kWh nawet przy 100% sprawności i pełnym rozładowaniu') : '')
+        + '</li>';
+    });
+    html += '</ul><p class="hint" style="margin:.3rem 0;">Filtr godzinowy tego nie wykryje '
+      + '— wszystkie te godziny mieszczą się w progach mocy. Sprawdź log BMS i komunikację z falownikiem.</p>';
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+/* Miesięczny walidator magazynu. Wszystkie godziny września i października
+ * mieszczą się w progach mocy, a mimo to bilans jest niemożliwy: rozstęp
+ * implied SOC wynosi 5,6× i 9,8× pojemności. Sierpień daje 1,00× — to
+ * jednocześnie waliduje test i potwierdza pojemność paczki. */
+function runBatteryValidation(){
+  state.haBatteryCheck = {};
+  for (const mk in state.haHourly){
+    const res = V.validateBatteryMonth(state.haHourly[mk], validateCfg);
+    state.haBatteryCheck[mk] = res;
+    if (!res.plausible){
+      log('Bateria ' + formatMonthLabel(mk) + ': ' + res.reason
+          + ' — liczniki ładowania/rozładowania są niespójne. Nie licz z nich korzyści magazynu.', 'error');
+    }
+  }
 }
 
 async function handleHaStatsFiles(fileList){
@@ -1171,22 +1423,29 @@ async function handleHaStatsFiles(fileList){
     try{
       const text = await file.text();
       const rows = parseCsvText(text);
-      const monthly = parseHaStatisticsCsv(rows, file.name);
+      const parsed = parseHaStatisticsCsv(rows, file.name);
+      const monthly = parsed.monthly;
+      // S1: było (m.haPobor||0) + h.poborHa — ponowne wgranie tego samego pliku
+      // DUBLOWAŁO dane (50 → 100 kWh). Plik jest pełnym eksportem zakresu,
+      // więc musi PODMIENIAĆ wartości, nie dodawać do istniejących.
       Object.keys(monthly).forEach(function(mk){
         if (!state.months[mk]) state.months[mk] = {kosztEnergii:0, kosztDystrybucji:0, manual:false};
         const m = state.months[mk];
         const h = monthly[mk];
-        m.haProdukcja = round2((m.haProdukcja||0) + h.produkcja);
-        m.haOddanie = round2((m.haOddanie||0) + h.oddanieHa);
-        m.haPobor = round2((m.haPobor||0) + h.poborHa);
-        m.haZuzycieDomu = round2((m.haZuzycieDomu||0) + h.zuzycieDomu);
-        m.haLadowanie = round2((m.haLadowanie||0) + h.ladowanie);
-        m.haRozladowanie = round2((m.haRozladowanie||0) + h.rozladowanie);
+        m.haProdukcja = round2(h.produkcja);
+        m.haOddanie = round2(h.oddanieHa);
+        m.haPobor = round2(h.poborHa);
+        m.haZuzycieDomu = round2(h.zuzycieDomu);
+        m.haLadowanie = round2(h.ladowanie);
+        m.haRozladowanie = round2(h.rozladowanie);
+        state.haRejected[mk] = parsed.rejected;
+        if (parsed.hourly[mk]) state.haHourly[mk] = parsed.hourly[mk];
       });
     } catch(e){
       log(file.name + ': błąd wczytywania — ' + e.message, 'error');
     }
   }
+  runBatteryValidation();
   updateHaStatus();
   render();
   await saveState();
@@ -1285,10 +1544,36 @@ function renderAnaliza(){
     const przypis = m.przypis || 0;
     const hasHa = m.haZuzycieDomu !== undefined && m.haPobor !== undefined;
     const hasPrecise = m.produkcjaKwh !== undefined && m.produkcjaKwh !== null;
-    let autoKwh, tier;
+    let autoKwh, tier, autoWarning = null;
     if (hasHa){
-      autoKwh = Math.max(0, m.haZuzycieDomu - m.haPobor); // całkowita autokonsumpcja (bezpośrednio + przez baterię), z prawdziwego zużycia domu
-      tier = 'ha';
+      // D1: było Math.max(0, …) z tier='ha' ustawionym z góry → gdy licznik
+      // poboru eksplodował (lipiec: 3019,7 kWh wobec 38,4 z TAURONa),
+      // różnica −2404 kWh była uciszana do 0,0 i opisana „dokładne (HA)”.
+      // Teraz ujemny wynik jest POKAZYWANY jako błąd danych, nie jako zero.
+      const raw = m.haZuzycieDomu - m.haPobor;
+      if (raw < 0){
+        autoKwh = null;
+        tier = 'blad';
+        autoWarning = 'zużycie (' + formatKwh1(m.haZuzycieDomu) + ') < pobór ('
+          + formatKwh1(m.haPobor) + ') — licznik HA uszkodzony w tym miesiącu';
+      } else {
+        autoKwh = raw;
+        tier = 'ha';
+      }
+      // D2: krzyżowa kontrola z liczników, które dotąd były wczytywane,
+      // ale nigdy nie używane w żadnych obliczeniach.
+      if (autoWarning === null && m.haProdukcja !== undefined && m.haOddanie !== undefined){
+        const net = m.haProdukcja - m.haOddanie;   // energia AC zostawiona na miejscu
+        if (net > 0 && raw > net * 1.25){
+          autoWarning = 'autokonsumpcja ' + formatKwh1(raw) + ' kWh przewyższa produkcję netto ('
+            + formatKwh1(net) + ' kWh) — sprawdź liczniki';
+        }
+      }
+      // Miesięczny test magazynu — jeśli nie przeszedł, oznacz miesiąc
+      const bc = state.haBatteryCheck[key];
+      if (bc && !bc.plausible){
+        autoWarning = (autoWarning ? autoWarning + '; ' : '') + 'bilans baterii niemożliwy (' + bc.ratio + '× pojemność)';
+      }
     } else if (hasPrecise){
       autoKwh = Math.max(0, m.produkcjaKwh - (m.kwh||0));
       tier = 'growatt';
@@ -1296,14 +1581,15 @@ function renderAnaliza(){
       autoKwh = m.autokonsumpcjaEstKwh || 0;
       tier = 'szacunek';
     }
-    const autoKnown = hasHa || hasPrecise || (m.nightRate !== null && m.nightRate !== undefined);
+    const autoKnown = (tier !== 'blad') && (hasHa || hasPrecise || (m.nightRate !== null && m.nightRate !== undefined));
     // Uśredniona efektywna stawka PLN/kWh (własna miesiąca, inaczej uśredniona z całych danych, inaczej ręczna zapasowa)
     // — ta sama funkcja co w Magazynie/Strefach, żeby stawka nigdy nie rozjechała się między zakładkami.
     const rateUsed = resolveEffectiveRate(key);
     const autoWartosc = (autoKnown && rateUsed !== null) ? autoKwh * rateUsed : null;
     const zysk = przypis + (autoWartosc || 0);
     cum += zysk;
-    return {key:key, przypis:przypis, autoKwh:autoKwh, autoWartosc:autoWartosc, zysk:zysk, cum:cum, autoKnown:autoKnown, tier:tier};
+    return {key:key, przypis:przypis, autoKwh:autoKwh, autoWartosc:autoWartosc, zysk:zysk, cum:cum,
+            autoKnown:autoKnown, tier:tier, autoWarning:autoWarning};
   });
 
   const tbody = document.getElementById('roiBody');
@@ -1312,11 +1598,17 @@ function renderAnaliza(){
   } else {
     tbody.innerHTML = rows.map(function(r){
       const pct = koszt > 0 ? Math.min(100, (r.cum / koszt * 100)) : null;
-      const tag = r.tier === 'ha' ? ' <span class="tag-manual" title="Z prawdziwego zużycia domu (Home Assistant)">dokładne (HA)</span>'
+      const tag = r.tier === 'blad'
+        ? ' <span class="tag-warn" style="background:#7f1d1d;color:#fff;" title="' + V.escapeHtml(r.autoWarning || 'błąd danych') + '">BŁĄD DANYCH</span>'
+        : r.autoWarning
+        ? ' <span class="tag-warn" title="' + V.escapeHtml(r.autoWarning) + '">sprawdź</span>'
+        : r.tier === 'ha' ? ' <span class="tag-manual" title="Z prawdziwego zużycia domu (Home Assistant)">dokładne (HA)</span>'
         : r.tier === 'growatt' ? ' <span class="tag-manual" title="Z realnej produkcji falownika">dokładne</span>'
         : (r.autoKnown ? ' <span class="tag-warn" title="Szacunek dzień/noc z eLicznika">szac.</span>' : '');
       const isEst = r.tier === 'szacunek';
-      const kwhCell = !r.autoKnown ? '—' : (formatKwh1(r.autoKwh) + tag);
+      const kwhCell = (r.tier === 'blad')
+        ? ('<span style="color:#f87171;" title="' + V.escapeHtml(r.autoWarning || '') + '">licznik HA uszkodzony</span>' + tag)
+        : !r.autoKnown ? '—' : (formatKwh1(r.autoKwh) + tag);
       const wartoscCell = (!r.autoKnown || r.autoWartosc === null) ? '—' : formatPLN(r.autoWartosc);
       return '<tr>' +
         '<td class="col-month">' + formatMonthLabel(r.key) + '</td>' +
@@ -1370,15 +1662,31 @@ function computeTranches(){
   const keys = Object.keys(state.months).sort();
   const refundRate = (state.refundRate !== undefined && state.refundRate !== null) ? state.refundRate : 0.30;
   const tranches = keys.filter(function(k){ return (state.months[k].przypis||0) > 0; }).map(function(k){
-    return { origin:k, initialValue:state.months[k].przypis, remaining:state.months[k].przypis,
-      expiryMonth: addMonths(k,12), expired:false, expiredAmount:0, potentialRefund:0 };
+    // art. 4c ust. 4: wartość ×1,23 jest przypisywana w MIESIĄCU NASTĘPNYM
+    // po wprowadzeniu energii. Transza żyje 12 miesięcy OD PRZYPISANIA,
+    // czyli od M+1 do M+12 włącznie → wygasa na początku M+13.
+    // Było addMonths(k,12), co skracało życie transzy o miesiąc.
+    const assignedMonth = addMonths(k, 1);
+    return { origin:k, assignedMonth:assignedMonth,
+      initialValue:state.months[k].przypis, remaining:state.months[k].przypis,
+      expiryMonth: addMonths(k,13), expired:false, expiredAmount:0, potentialRefund:0 };
   });
 
   function expireIfDue(cutoffMonth){
     tranches.forEach(function(t){
       if (!t.expired && t.expiryMonth <= cutoffMonth){
         t.expiredAmount = t.remaining;
-        t.potentialRefund = Math.min(t.remaining, refundRate * t.initialValue);
+        // art. 4 ust. 11a pkt 2: limit to 30% wartości energii wprowadzonej
+        // w miesiącu, KTÓREGO DOTYCZY ZWROT — czyli miesiąca pochodzenia
+        // transzy, nie całego salda i nie miesiąca wypłaty.
+        // Podstawa (przed czy po ×1,23) jest konfigurowalna, bo przepis
+        // i praktyka sprzedawców się tu rozjeżdżają o 23%.
+        const cap = V.refundCap(t.remaining, t.initialValue, refundRate,
+                                state.refundCapBasis || 'base', t.origin);
+        t.potentialRefund = cap.refund;
+        t.refundCap = cap.cap;
+        t.refundCapBase = cap.capBase;
+        t.writtenOff = cap.writtenOff;
         t.remaining = 0;
         t.expired = true;
       }
@@ -1390,7 +1698,7 @@ function computeTranches(){
     let need = state.months[m].kosztEnergii || 0;
     for (const t of tranches){
       if (need <= 0) break;
-      if (t.expired || t.origin > m || t.remaining <= 0) continue;
+      if (t.expired || t.assignedMonth > m || t.remaining <= 0) continue;
       const used = Math.min(need, t.remaining);
       t.remaining -= used;
       need -= used;
@@ -1449,6 +1757,15 @@ document.getElementById('inputRefundRate').addEventListener('change', function(e
   state.refundRate = isNaN(val) ? 0.30 : (val/100);
   renderWygasanie();
   saveState();
+});
+
+document.getElementById('inputRefundCapBasis').addEventListener('change', function(e){
+  state.refundCapBasis = e.target.value === 'deposit' ? 'deposit' : 'base';
+  renderWygasanie();
+  saveState();
+  log('Podstawa limitu zwrotu: ' + (state.refundCapBasis === 'base'
+    ? 'wartość energii wprowadzonej (przed ×1,23) — literalny art. 4 ust. 11a pkt 2'
+    : 'depozyt po ×1,23') + '.', 'info');
 });
 
 /* ============================== MAGAZYN (symulacja baterii) ============================== */
@@ -1514,28 +1831,44 @@ function renderRealBattery(){
   const readoutEl = document.getElementById('readoutRealBattery');
   const subEl = document.getElementById('readoutRealBatterySub');
   if (!keys.length){
-    tbody.innerHTML = '<tr><td colspan="4" class="empty-state">Brak danych z Home Assistant — wgraj eksport w zakładce Analiza.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Brak danych z Home Assistant — wgraj eksport w zakładce Analiza.</td></tr>';
     document.getElementById('realBatteryFoot').innerHTML = '';
     if (readoutEl){ readoutEl.textContent = '—'; subEl.textContent = 'brak danych z Home Assistant'; }
     return;
   }
-  let sumCharge=0, sumDischarge=0, sumValue=0, monthsWithValue=0;
+  let sumCharge=0, sumDischarge=0, sumValue=0, monthsWithValue=0, sumGridKwh=0, sumGridCost=0;
   tbody.innerHTML = keys.map(function(k){
     const m = state.months[k];
     const rate = resolveEffectiveRate(k);
-    const value = rate !== null ? m.haRozladowanie * rate : null;
+    // D3: było value = haRozladowanie * rate — całe rozładowanie traktowane
+    // jako oszczędność, bez kosztu energii kupionej do naładowania baterii.
+    // Od września bateria jest ładowana z sieci (sierpień: dokładnie 0 kWh),
+    // więc zawyżenie trzeba odjąć po cenie ZAKUPU, nie po cenie depozytu.
+    const grid = estimateGridCharge(k);
+    const gridCost = (rate !== null && grid.kwh > 0) ? grid.kwh * rate : 0;
+    const gross = rate !== null ? m.haRozladowanie * rate : null;
+    const value = gross !== null ? gross - gridCost : null;
+    const bc = state.haBatteryCheck[k];
     sumCharge += m.haLadowanie; sumDischarge += m.haRozladowanie;
+    sumGridKwh += grid.kwh; sumGridCost += gridCost;
     if (value !== null){ sumValue += value; monthsWithValue++; }
+    const warn = (bc && !bc.plausible)
+      ? ' <span class="tag-warn" style="background:#7f1d1d;color:#fff;" title="' + V.escapeHtml(bc.reason || '') + '">bilans niemożliwy</span>'
+      : '';
     return '<tr>' +
-      '<td class="col-month">' + formatMonthLabel(k) + '</td>' +
+      '<td class="col-month">' + V.escapeHtml(formatMonthLabel(k)) + warn + '</td>' +
       '<td class="num">' + formatKwh1(m.haLadowanie) + '</td>' +
       '<td class="num">' + formatKwh1(m.haRozladowanie) + '</td>' +
+      '<td class="num">' + formatKwh1(grid.kwh) + (grid.estimated ? ' <span class="tag-warn" title="Szacunek: ładowanie przy zerowej produkcji AC">szac.</span>' : '') + '</td>' +
+      '<td class="num accent-rust">' + (rate === null ? '—' : formatPLN(-gridCost)) + '</td>' +
       '<td class="num accent-strong">' + (value === null ? '—' : formatPLN(value)) + '</td>' +
     '</tr>';
   }).join('');
   document.getElementById('realBatteryFoot').innerHTML = '<tr><td>SUMA</td>' +
     '<td class="num">' + formatKwh1(sumCharge) + '</td>' +
     '<td class="num">' + formatKwh1(sumDischarge) + '</td>' +
+    '<td class="num">' + formatKwh1(sumGridKwh) + '</td>' +
+    '<td class="num accent-rust">' + formatPLN(-sumGridCost) + '</td>' +
     '<td class="num accent-strong">' + formatPLN(sumValue) + '</td></tr>';
 
   if (readoutEl){
@@ -1659,9 +1992,13 @@ function renderZoneRateInputs(zones){
   container.innerHTML = zones.map(function(z){
     const val = state.zoneRates[z] !== undefined ? state.zoneRates[z] : '';
     const safeId = 'zoneRate_' + z.replace(/[^a-zA-Z0-9]/g,'_');
+    // T2/T26: nazwa strefy pochodzi z kolumny „Strefa” wgranego pliku CSV
+    // i trafiała surowa do innerHTML → przechowywany XSS z dostępem do
+    // tokenów HA. Każda interpolacja danych zewnętrznych musi być escaped.
+    const zHtml = V.escapeHtml(z);
     return '<div class="roi-input-row" style="margin-bottom:.6rem;">' +
-      '<label for="' + safeId + '">Strefa ' + z + ' [PLN/kWh]</label>' +
-      '<input type="number" step="0.01" min="0" class="zone-rate-input" data-zone="' + z + '" id="' + safeId + '" value="' + val + '">' +
+      '<label for="' + safeId + '">Strefa ' + zHtml + ' [PLN/kWh]</label>' +
+      '<input type="number" step="0.01" min="0" class="zone-rate-input" data-zone="' + zHtml + '" id="' + safeId + '" value="' + V.escapeHtml(val) + '">' +
     '</div>';
   }).join('');
   container.querySelectorAll('.zone-rate-input').forEach(function(inp){
@@ -1681,7 +2018,7 @@ function renderStrefy(){
 
   const hasAnyRate = zones.some(function(z){ return (state.zoneRates[z]||0) > 0; });
   const headRow = document.getElementById('strefyHeadRow');
-  headRow.innerHTML = '<th>Miesiąc</th>' + zones.map(function(z){ return '<th>Strefa ' + z + ' [kWh]</th>'; }).join('') +
+  headRow.innerHTML = '<th>Miesiąc</th>' + zones.map(function(z){ return '<th>Strefa ' + V.escapeHtml(z) + ' [kWh]</th>'; }).join('') +
     (hasAnyRate ? '<th>Koszt razem wg stref</th>' : '');
 
   const keys = Object.keys(state.months).sort();
@@ -1779,7 +2116,7 @@ function storageUsable(){
 }
 async function saveState(){
   if (!storageUsable()) return;
-  try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates})); }
+  try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates})); }
   catch(e){ log('Nie udało się zapisać rejestru miesięcy: ' + e.message, 'error'); }
   try{ await window.storage.set('rce-cache', JSON.stringify(state.rceHourly)); }
   catch(e){ log('Nie udało się zapisać cache cen RCE: ' + e.message, 'error'); }
@@ -1795,6 +2132,7 @@ async function loadState(){
           state.kosztInwestycji = parsed.kosztInwestycji || 0;
           state.manualRatePlnKwh = (parsed.manualRatePlnKwh !== undefined) ? parsed.manualRatePlnKwh : null;
           state.refundRate = (parsed.refundRate !== undefined && parsed.refundRate !== null) ? parsed.refundRate : 0.30;
+          state.refundCapBasis = parsed.refundCapBasis === 'deposit' ? 'deposit' : 'base';
           state.batCapacityKwh = (parsed.batCapacityKwh !== undefined) ? parsed.batCapacityKwh : null;
           state.batEfficiency = (parsed.batEfficiency !== undefined && parsed.batEfficiency !== null) ? parsed.batEfficiency : 0.90;
           state.batCostPln = parsed.batCostPln || 0;
@@ -1815,6 +2153,8 @@ async function loadState(){
   if (rateInput && state.manualRatePlnKwh) rateInput.value = state.manualRatePlnKwh;
   const refundInput = document.getElementById('inputRefundRate');
   if (refundInput) refundInput.value = Math.round((state.refundRate !== undefined ? state.refundRate : 0.30) * 100);
+  const basisInput = document.getElementById('inputRefundCapBasis');
+  if (basisInput) basisInput.value = state.refundCapBasis === 'deposit' ? 'deposit' : 'base';
   const capInput = document.getElementById('inputBatCapacity');
   if (capInput && state.batCapacityKwh) capInput.value = state.batCapacityKwh;
   const effInput = document.getElementById('inputBatEfficiency');
@@ -1946,6 +2286,14 @@ async function loadAddonConfig(){
 }
 
 async function autoSyncGrowattFromHA(){
+  // S3: bez tej flagi kliknięcie „Synchronizuj” w trakcie trwania synchronizacji
+  // uruchamiało drugą, a obie dodawały te same dane → podwójne wartości.
+  // Timer z setupGrowattAutoRefresh() mógł nałożyć się na ręczne kliknięcie.
+  if (haSyncInFlight){
+    log('Synchronizacja z HA już trwa — pomijam kolejne wywołanie.', 'warn');
+    return;
+  }
+  haSyncInFlight = true;
   const statusEl = document.getElementById('haAutoSyncStatus');
   const btn = document.getElementById('btnGrowattAutoSync');
   if (btn) btn.disabled = true;
@@ -1955,7 +2303,10 @@ async function autoSyncGrowattFromHA(){
     const end = new Date();
     const start = new Date(end.getFullYear(), end.getMonth() - (cfg.historyMonthsBack - 1), 1);
     const startStr = start.toISOString().slice(0,10);
-    const endStr = end.toISOString().slice(0,10);
+    // S2: było end.toISOString().slice(0,10) → sama data, którą backend
+    // interpretował jako północ UTC. W Polsce to 01:00/02:00, więc sync
+    // gubił 18–23 godziny bieżącego dnia. Teraz pełny timestamp.
+    const endStr = end.toISOString();
 
     const resp = await fetch('api/growatt/ha-stats.csv?start=' + startStr + '&end=' + endStr);
     if (!resp.ok){
@@ -2014,6 +2365,7 @@ async function autoSyncGrowattFromHA(){
     log('Automatyczna synchronizacja Growatt z HA nie powiodła się: ' + e.message + ' — możesz użyć importu ręcznego poniżej.', 'error');
     if (statusEl) statusEl.textContent = 'Automatyczna synchronizacja nieudana — patrz log poniżej.';
   } finally {
+    haSyncInFlight = false;
     if (btn) btn.disabled = false;
   }
 }
