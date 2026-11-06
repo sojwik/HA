@@ -312,6 +312,32 @@
   </section>
 
   <section class="panel" style="margin-bottom:1.25rem;">
+    <h2>Eksport innych encji z Home Assistant (diagnostyka, np. JK-BMS)</h2>
+    <p class="hint">Pobiera godzinowe statystyki dowolnych encji — przydatne, gdy trzeba
+      porównać pomiary niezależne od falownika (prąd i napięcie z BMS po stronie DC).
+      Czujniki chwilowe (moc, prąd, napięcie, SOC) mają w HA tylko <code>mean</code>/<code>min</code>/<code>max</code>,
+      nie <code>change</code>/<code>sum</code> — dlatego to osobny eksport.</p>
+    <p class="hint"><strong>Nie trzeba niczego wpisywać w pasku adresu.</strong> Przycisk pobiera
+      plik przez ten sam adres względny, którym strona łączy się z backendem, więc działa
+      pod ingress HA i pod każdym proxy.</p>
+    <label for="inputExportEntities" class="hint">Entity ID (po przecinku lub w osobnych liniach)</label>
+    <textarea id="inputExportEntities" rows="4" style="width:100%;font-family:monospace;font-size:.85rem;"
+      placeholder="sensor.jk_bms_discharging_power&#10;sensor.jk_bms_charging_power&#10;sensor.jk_bms_current&#10;sensor.jk_bms_total_voltage&#10;sensor.jk_bms_state_of_charge"></textarea>
+    <div class="grid-two" style="margin-top:.5rem;margin-bottom:0;">
+      <div>
+        <label for="inputExportStart" class="hint">Od</label>
+        <input type="date" id="inputExportStart">
+      </div>
+      <div>
+        <label for="inputExportEnd" class="hint">Do</label>
+        <input type="date" id="inputExportEnd">
+      </div>
+    </div>
+    <button type="button" id="btnExportEntities" class="btn-primary btn-sm" style="margin-top:.6rem;">Pobierz CSV</button>
+    <div class="status" id="exportEntitiesStatus"></div>
+  </section>
+
+  <section class="panel" style="margin-bottom:1.25rem;">
     <h2>Koszt inwestycji</h2>
     <p class="hint">Jednorazowy koszt instalacji PV. „Zwrot” liczony jest jako suma przypisów do depozytu (wartość energii oddanej do sieci) narastająco w czasie — niezależnie czy dana kwota została już wykorzystana na fakturę czy zostaje jako saldo, bo to i tak realna korzyść finansowa z instalacji.</p>
     <div class="roi-input-row">
@@ -1933,17 +1959,35 @@ function renderRealBattery(){
   // F33: pod stołem pokaż, ile z sumy pochodzi z miesięcy niewiarygodnych.
   const noteEl = document.getElementById('realBatteryNote');
   if (noteEl){
+    const parts = [];
     if (flaggedMonths > 0){
-      noteEl.innerHTML = '<p class="hint" style="margin:.5rem 0;padding:.5rem .7rem;'
+      parts.push('<p class="hint" style="margin:.5rem 0;padding:.5rem .7rem;'
         + 'background:#7f1d1d22;border-left:3px solid #b91c1c;">'
         + '<strong>Z sumy ' + formatPLN(sumValue) + ' aż ' + formatPLN(flaggedValue)
         + ' pochodzi z ' + flaggedMonths + ' mies. z niemożliwym bilansem magazynu.</strong> '
         + 'Te liczby nie są wiarygodne — liczniki ładowania/rozładowania są niespójne. '
         + 'Nagłówek wyżej liczy wyłącznie pozostałe ' + formatPLN(trustedValue)
-        + ' z ' + trustedMonths + ' mies. Napraw liczniki, żeby odzyskać pełny obraz.</p>';
-    } else {
-      noteEl.innerHTML = '';
+        + ' z ' + trustedMonths + ' mies. Napraw liczniki, żeby odzyskać pełny obraz.</p>');
     }
+    // D6: wiersz SUMA pokazywał więcej rozładowania niż ładowania bez komentarza.
+    // Test miesięczny tego nie łapie, bo każdy miesiąc osobno może wyglądać
+    // dobrze, a nadmiar narasta dopiero w całym okresie.
+    const total = V.validateBatteryTotal(keys.map(function(k){
+      return { ladowanie: state.months[k].haLadowanie, rozladowanie: state.months[k].haRozladowanie };
+    }), validateCfg);
+    if (total.impossible){
+      parts.push('<p class="hint" style="margin:.5rem 0;padding:.5rem .7rem;'
+        + 'background:#7f1d1d22;border-left:3px solid #b91c1c;">'
+        + '<strong>Wiersz SUMA jest fizycznie niemożliwy.</strong> '
+        + 'Rozładowano ' + formatKwh1(total.discharge) + ' kWh, a naładowano tylko '
+        + formatKwh1(total.charge) + ' kWh. Przy sprawności ' + total.eta.toFixed(2)
+        + ' i starcie z pełnej paczki ' + total.capacity.toFixed(2)
+        + ' kWh maksimum wynosi ' + formatKwh1(total.maxDischarge) + ' kWh — nadmiar <strong>'
+        + formatKwh1(total.excess) + ' kWh</strong> wzięło się znikąd. '
+        + 'To nie jest sprawność powyżej 100%, tylko niespójne liczniki. '
+        + 'Sprawność pozorna całego okresu: ' + total.apparentEfficiency.toFixed(1) + '%.</p>');
+    }
+    noteEl.innerHTML = parts.join('');
   }
 
   if (readoutEl){
@@ -2565,10 +2609,73 @@ async function autoSyncGrowattFromHA(){
 function setupGrowattAutoRefresh(){
   const btn = document.getElementById('btnGrowattAutoSync');
   if (btn) btn.addEventListener('click', autoSyncGrowattFromHA);
+  const btnExp = document.getElementById('btnExportEntities');
+  if (btnExp) btnExp.addEventListener('click', exportEntitiesCsv);
   loadAddonConfig().then(function(cfg){
     if (growattAutoSyncTimer) clearInterval(growattAutoSyncTimer);
     growattAutoSyncTimer = setInterval(autoSyncGrowattFromHA, Math.max(5, cfg.refreshIntervalMinutes) * 60 * 1000);
   });
+}
+
+/* ============================== EKSPORT DOWOLNYCH ENCJI (F40) ==============================
+ * Adres WZGLĘDNY, tak jak window.storage używa 'api/kv'. Dzięki temu nie trzeba
+ * znać tokenu ingress ani prefiksu proxy. Ręczne składanie adresu w pasku
+ * przeglądarki kończyło się trafieniem w powłokę SPA Home Assistant. */
+async function exportEntitiesCsv(){
+  const statusEl = document.getElementById('exportEntitiesStatus');
+  // Arkusz ma tylko .status — komunikat idzie jako textContent (bez wklejania
+  // HTML), a kolor przez styl inline, żeby nie zależeć od nieistniejących klas.
+  const say = function(msg, kind){
+    if (!statusEl) return;
+    statusEl.textContent = msg;
+    statusEl.style.color = kind === 'error' ? '#b91c1c'
+      : kind === 'warn' ? '#b45309'
+      : kind === 'ok' ? '#15803d' : '';
+  };
+  const raw = (document.getElementById('inputExportEntities') || {}).value || '';
+  const entities = raw.split(/[,\s]+/).map(function(x){ return x.trim(); }).filter(Boolean);
+  if (!entities.length){ say('Wpisz co najmniej jedno entity_id.', 'warn'); return; }
+  const bad = entities.filter(function(id){ return !/^[a-z_]+\.[a-z0-9_]+$/.test(id); });
+  if (bad.length){ say('Nieprawidłowe entity_id: ' + bad.join(', ') + ' (małe litery, bez spacji).', 'error'); return; }
+  const start = (document.getElementById('inputExportStart') || {}).value || '';
+  const end = (document.getElementById('inputExportEnd') || {}).value || '';
+  if (start && end && start >= end){ say('Data „Od” musi być wcześniejsza niż „Do”.', 'error'); return; }
+
+  const qs = new URLSearchParams();
+  qs.set('entities', entities.join(','));
+  if (start) qs.set('start', start);
+  if (end) qs.set('end', end);
+  qs.set('types', 'mean,min,max');
+  say('Pobieram ' + entities.length + ' encji z Home Assistant…', 'info');
+  try{
+    const r = await fetch('api/ha/stats.csv?' + qs.toString());
+    if (!r.ok){
+      let detail = 'HTTP ' + r.status;
+      try{ const j = await r.json(); if (j && j.error) detail += ': ' + j.error; }catch(e){}
+      say('Nie udało się pobrać — ' + detail, 'error');
+      return;
+    }
+    const text = await r.text();
+    const rows = text.trim().split('\n').length - 1;
+    if (rows <= 0){
+      say('Plik jest pusty. Encja musi mieć state_class (measurement/total/total_increasing), '
+        + 'inaczej HA nie tworzy dla niej statystyk. Sprawdź Narzędzia deweloperskie → Stany.', 'warn');
+      return;
+    }
+    const blob = new Blob([text], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'ha-stats-bms.csv';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function(){ URL.revokeObjectURL(url); }, 1000);
+    say('Pobrano ' + rows + ' wierszy dla ' + entities.length + ' encji → ha-stats-bms.csv', 'ok');
+    log('Eksport encji: ' + rows + ' wierszy (' + entities.join(', ') + ').', 'info');
+  }catch(e){
+    say('Błąd połączenia: ' + e.message, 'error');
+  }
 }
 
 /* ============================== INIT ============================== */
