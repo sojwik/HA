@@ -122,7 +122,7 @@ function serveDir(dir) {
   // Strona SAMA definiuje window.storage (shim na fetch do api/kv), więc
   // podstawienie window.storage w beforeParse nie działa — zostanie nadpisane.
   // Podmieniamy fetch, czyli warstwę, z której ten shim faktycznie korzysta.
-  async function loadWithCache(cacheValue, extraKv) {
+  async function loadWithCache(cacheValue, extraKv, apiConfig) {
     const kv = Object.assign({ 'rce-cache': cacheValue }, extraKv || {});
     const dom2 = await JSDOM.fromURL(`http://127.0.0.1:${port}/index.html`, {
       runScripts: 'dangerously',
@@ -132,6 +132,11 @@ function serveDir(dir) {
         window.XLSX = { read: () => ({ SheetNames: ['a'], Sheets: { a: {} } }), utils: { sheet_to_json: () => [] } };
         window.fetch = (url, opts) => {
           const u = String(url);
+          // F39: /api/config musi dać się podstawć, żeby sprawdzić, czy opcje
+          // dodatku naprawdę docierają do walidatora w przeglądarce.
+          if (apiConfig && /api\/config/.test(u)) {
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve(apiConfig) });
+          }
           const lm = u.match(/api\/kv\?prefix=(.*)$/);
           if (lm) {
             const pre = decodeURIComponent(lm[1]);
@@ -296,9 +301,31 @@ function serveDir(dir) {
     const nRows = (tbl.match(/<tr>/g) || []).length - 1;
     t('D27 tabela odrzuceń ma 5 wierszy (marzec–lipiec), nie 9',
       nRows === 5, 'wierszy: ' + nRows);
+    const capDefault = diagUp.match(/pojemność ([\d.]+) kWh/);
+    t('D28 domyślna pojemność w diagnozie = 14.34 kWh (nie 16.35)',
+      capDefault && capDefault[1] === '14.34',
+      'znaleziono: ' + (capDefault ? capDefault[1] : 'brak'));
     dUp.window.close();
+
+    // F39: opcja battery_capacity_kwh ustawiona w HA musi nadpisać domyślną
+    // z validate.js. Wcześniej validateCfg powstawało raz z defaultów
+    // i opcja była po stronie przeglądarki całkowicie ignorowana.
+    console.log('\n=== F39: opcje dodatku docierają do walidatora ===');
+    const dCfg = await loadWithCache(null, {}, { batteryCapacityKwh: 5, batteryEta: 0.92 });
+    const wc = dCfg.window, dc = wc.document;
+    const fileC = new wc.File([csvText], 'growatt-ha-auto-sync.csv', { type: 'text/csv' });
+    if (typeof fileC.text !== 'function') fileC.text = () => Promise.resolve(csvText);
+    const inputC = dc.getElementById('fileHaStats');
+    Object.defineProperty(inputC, 'files', { value: [fileC], configurable: true });
+    inputC.dispatchEvent(new wc.Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 4000));
+    const diagCfg = (dc.getElementById('haDiagnostics') || {}).textContent || '';
+    t('D29 pojemność z /api/config (5 kWh) nadpisuje domyślną 14.34',
+      /pojemność 5\.00 kWh/.test(diagCfg),
+      'fragment: ' + (diagCfg.match(/pojemność [\d.]+ kWh/) || ['brak'])[0]);
+    dCfg.window.close();
   } else {
-    console.log('\n  (pominięto D26/D27 — brak realnego CSV; ustaw G13_TEST_CSV)');
+    console.log('\n  (pominięto D26–D29 — brak realnego CSV; ustaw G13_TEST_CSV)');
   }
 
   srv.close();

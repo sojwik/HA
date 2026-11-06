@@ -219,11 +219,35 @@ app.get('/api/growatt/ha-stats.csv', async (req, res) => {
 });
 
 /* ---------- statyczny frontend ---------- */
-app.use(express.static(path.join(__dirname, 'public'), {
+// F38: index.html jest serwowany z ?v=<mtime> przy validate.js. Bez tego
+// przeglądarka po aktualizacji dodatku potrafiła uruchomić NOWY index.html
+// ze STARYM validate.js — na produkcji objawiało się to pojemnością
+// 16.35 kWh mimo 14.34 w kodzie, przy działającym nowym ostrzeżeniu F37.
+const PUBLIC_DIR = path.join(__dirname, 'public');
+let assetTag = '';
+try {
+  assetTag = String(Math.floor(fs.statSync(path.join(PUBLIC_DIR, 'validate.js')).mtimeMs));
+} catch (e) { /* brak pliku — index poleci bez wersji */ }
+
+app.get(['/', '/index.html'], (req, res, next) => {
+  fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8', (err, html) => {
+    if (err) return next(err);
+    if (assetTag) {
+      html = html.replace(/(<script src=")(validate\.js|vendor\/xlsx\.full\.min\.js)(")/g,
+        (m, a, file, c) => a + file + '?v=' + assetTag + c);
+    }
+    res.set('Cache-Control', 'no-cache');
+    res.type('html').send(html);
+  });
+});
+
+app.use(express.static(PUBLIC_DIR, {
   index: 'index.html',
   dotfiles: 'deny',
   setHeaders(res, filePath) {
-    if (filePath.endsWith('.html')) res.set('Cache-Control', 'no-cache');
+    // F38: nie tylko HTML. Walidator i biblioteki też muszą być rewalidowane,
+    // inaczej aktualizacja dodatku nie dociera do przeglądarki.
+    if (/\.(html|js|css)$/.test(filePath)) res.set('Cache-Control', 'no-cache');
   },
 }));
 

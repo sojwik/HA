@@ -140,6 +140,29 @@ function waitForServer(timeoutMs) {
     r.json && r.json.batteryCapacityKwh === Vcheck.resolveConfig().batteryCapacityKwh,
     'serwer: ' + (r.json && r.json.batteryCapacityKwh) + ', walidator: ' + Vcheck.resolveConfig().batteryCapacityKwh);
 
+  console.log('\n=== F38: aktualizacja dodatku musi dotrzeć do przeglądarki ===');
+  // Regresja z produkcji: no-cache był ustawiany TYLKO dla .html, więc po
+  // aktualizacji przeglądarka uruchamiała nowy index.html ze starym
+  // validate.js. Log pokazywał pojemność 16.35 kWh przy 14.34 w kodzie,
+  // a jednocześnie nowe ostrzeżenie F37 z index.html działało.
+  const idx = await req('GET', '/');
+  t('S32 index.html wskazuje validate.js z wersją (?v=…)',
+    idx.status === 200 && /<script src="validate\.js\?v=\d+"/.test(idx.text),
+    'status ' + idx.status + ', fragment: ' + (idx.text.match(/<script src="validate[^>]*>/) || ['brak'])[0]);
+  const vjs = await req('GET', '/validate.js');
+  t('S33 validate.js serwowany z Cache-Control: no-cache',
+    vjs.status === 200 && /no-cache/.test(vjs.headers.get('cache-control') || ''),
+    'cache-control: ' + vjs.headers.get('cache-control'));
+  const vend = await req('GET', '/vendor/xlsx.full.min.js');
+  t('S34 vendor/*.js też rewalidowany',
+    vend.status === 200 && /no-cache/.test(vend.headers.get('cache-control') || ''),
+    'cache-control: ' + vend.headers.get('cache-control'));
+  // Podmiana treści nie może uciąć pliku — index jest teraz czytany i wysyłany
+  // ręcznie, więc sprawdzamy, że ogon dokumentu dotarł w całości.
+  t('S35 serwowany index.html kompletny (nie ucięty)',
+    idx.text.includes('setupGrowattAutoRefresh') && /<\/html>\s*$/.test(idx.text),
+    'długość ' + idx.text.length + ', koniec: ' + JSON.stringify(idx.text.slice(-40)));
+
   console.log('\n=== CSP musi dopuszczać hosta, którego używa frontend ===');
   // Regresja: CSP miało api.pse.pl, a frontend api.raporty.pse.pl. Przeglądarka
   // blokowała natychmiast, więc wszystkie 31 dni RCE padały w tej samej sekundzie.

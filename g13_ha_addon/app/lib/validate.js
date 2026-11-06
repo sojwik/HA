@@ -172,10 +172,11 @@
    * rozstęp max(B) − min(B) nie może przekroczyć pojemności. Test NIE wymaga
    * znajomości SOC początkowego.
    *
-   * Walidacja na realnych danych (pojemność 16,35 kWh, η = 0,92):
-   *   sierpień    16,4 kWh → 1,00×  ✓ (miesiąc referencyjny)
-   *   wrzesień    91,9 kWh → 5,62×  ✗
-   *   październik 159,4 kWh → 9,75× ✗
+   * Walidacja na realnych danych (pojemność 14,34 kWh, η = 0,92, próg 1,20×):
+   *   sierpień    16,4 kWh → 1,14×  ✓ (miesiąc referencyjny)
+   *   kwiecień    27,1 kWh → 1,89×  ✗
+   *   wrzesień    91,9 kWh → 6,41×  ✗
+   *   październik 159,4 kWh → 11,12× ✗
    *
    * UWAGA: ten test wykrywa błąd, którego filtr godzinowy NIE widzi — wszystkie
    * godziny września i października mieszczą się w progach mocy.
