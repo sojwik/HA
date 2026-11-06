@@ -218,6 +218,49 @@ if (CSV) {
     assert.ok(b.hardExcess > 100, 'nadmiar ' + b.hardExcess);
   });
 
+  console.log('\n=== F37: kompletność miesiąca (marzec 2026 = 743 h) ===');
+  t('K1 marzec 2026 ma 743 h (zmiana czasu 29.03)', () => {
+    let sum = 0;
+    for (let d = 1; d <= 31; d++) sum += V.expectedHoursInDay('2026-03-' + String(d).padStart(2, '0'));
+    assert.strictEqual(sum, 743, 'otrzymano ' + sum);
+  });
+  t('K2 październik 2026: 745 godzin rzeczywistych, 744 unikalne etykiety', () => {
+    let real = 0, labels = 0;
+    for (let d = 1; d <= 31; d++) {
+      const e = V.expectedHoursInDay('2026-10-' + String(d).padStart(2, '0'));
+      real += e; labels += Math.min(24, e);
+    }
+    assert.strictEqual(real, 745, 'rzeczywiste ' + real);
+    // Kompletność eLicznika musi liczyć etykiety, inaczej październik
+    // co miesiąc dostawałby fałszywe ostrzeżenie o brakującej godzinie.
+    assert.strictEqual(labels, 744, 'etykiety ' + labels);
+  });
+
+  console.log('\n=== F31: odrzucenia MUSZĄ być podzielone na miesiące ===');
+  // Regresja: wcześniej state.haRejected[mk] = parsed.rejected (jeden globalny
+  // obiekt), więc 192 h pokazywało się w każdym z 9 miesięcy -> nagłówek 1728 h.
+  t('R1 suma miesięcy równa się sumie globalnej', () => {
+    const bm = parsed.rejected.byMonth;
+    assert.ok(bm, 'brak byMonth');
+    const sum = Object.values(bm).reduce((a, b) => a + b.total, 0);
+    assert.strictEqual(sum, parsed.rejected.total, sum + ' != ' + parsed.rejected.total);
+  });
+  t('R2 miesiące NIE mają identycznych liczników', () => {
+    const counts = Object.values(parsed.rejected.byMonth).map(b => b.total);
+    assert.ok(new Set(counts).size > 1, 'wszystkie miesiące mają tyle samo: ' + counts);
+  });
+  t('R3 lipiec niesie prawie całość odrzuconych kWh', () => {
+    const bm = parsed.rejected.byMonth;
+    assert.ok(bm['2026-07'].rejectedKwh > 2900, 'lipiec ' + bm['2026-07'].rejectedKwh);
+    assert.ok(Math.abs(bm['2026-04'].rejectedKwh) < 200, 'kwiecień ' + bm['2026-04'].rejectedKwh);
+  });
+  t('R4 sierpień/wrzesień/październik bez odrzuceń godzinowych', () => {
+    const bm = parsed.rejected.byMonth;
+    ['2026-08', '2026-09', '2026-10'].forEach(function(mk){
+      assert.ok(!bm[mk] || bm[mk].total === 0, mk + ' ma ' + (bm[mk] && bm[mk].total));
+    });
+  });
+
   console.log('\n=== F16: szacunek ładowania z sieci ===');
   t('C1 sierpień = 0 kWh (brak ładowania z sieci)', () => {
     assert.strictEqual(sandbox.estimateGridCharge('2026-08').kwh, 0);

@@ -106,6 +106,11 @@
    * ------------------------------------------------------------------------*/
   function createRejectionLog() {
     const byRole = {};
+    // Podział na miesiące MUSI być liczony tutaj, a nie sklejany później.
+    // Wcześniej frontend przypisywał całemu miesiącowi jeden globalny summary,
+    // więc 192 odrzucone godziny pokazywały się w każdym z 9 miesięcy,
+    // a nagłówek sumował je do 1728 (9×).
+    const byMonth = {};
     // Dwa osobne koszyki: przekroczenia są rzadsze i ważniejsze diagnostycznie,
     // więc nie mogą zostać wyparte przez masę ujemnych delt (kwiecień: 86 h).
     const overLimitSamples = [];
@@ -120,12 +125,22 @@
         byRole[role].count++;
         byRole[role].kwh += delta;
         rejectedKwh += delta;
+        const mk = monthKeyFromUtc(ts);
+        if (!byMonth[mk]) byMonth[mk] = { total: 0, rejectedKwh: 0, byRole: {} };
+        const bm = byMonth[mk];
+        bm.total++;
+        bm.rejectedKwh += delta;
+        if (!bm.byRole[role]) bm.byRole[role] = { count: 0, kwh: 0, negative: 0, overLimit: 0 };
+        bm.byRole[role].count++;
+        bm.byRole[role].kwh += delta;
         const rec = { role, ts, delta, reason: verdict.reason };
         if (verdict.reason === 'ujemna delta') {
           byRole[role].negative++;
+          bm.byRole[role].negative++;
           if (negativeSamples.length < 30) negativeSamples.push(rec);
         } else {
           byRole[role].overLimit++;
+          bm.byRole[role].overLimit++;
           if (overLimitSamples.length < 60) overLimitSamples.push(rec);
         }
       },
@@ -134,6 +149,13 @@
           total,
           rejectedKwh: Math.round(rejectedKwh * 100) / 100,
           byRole,
+          // Zaokrąglamy per miesiąc tak samo jak sumę globalną.
+          byMonth: Object.keys(byMonth).reduce(function(acc, k){
+            acc[k] = { total: byMonth[k].total,
+                       rejectedKwh: Math.round(byMonth[k].rejectedKwh * 100) / 100,
+                       byRole: byMonth[k].byRole };
+            return acc;
+          }, {}),
           overLimitSamples,
           negativeSamples,
           samples: overLimitSamples.concat(negativeSamples),

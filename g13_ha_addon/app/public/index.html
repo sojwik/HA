@@ -448,6 +448,7 @@
         <tfoot id="realBatteryFoot"></tfoot>
       </table>
     </div>
+    <div id="realBatteryNote"></div>
     <p class="hint" style="margin-top:.6rem;">Zysk netto = rozładowanie × stawka − energia kupiona z sieci × stawka. Samo rozładowanie nie jest oszczędnością, jeśli bateria była ładowana z sieci. Kolumna „Z sieci” to szacunek (ładowanie przy zerowej produkcji AC) — nie widzi ładowania z sieci przy jednoczesnej produkcji PV, więc rzeczywisty koszt może być wyższy. Miesiące z niemożliwym bilansem magazynu są oznaczone na czerwono.</p>
   </section>
 
@@ -848,6 +849,33 @@ async function handleElicznikFiles(fileList){
       parsed.forEach(function(r){ addElicznikRow(r.date, r.hour, r.oddaniePoZbil, r.poborPoZbil, r.strefa, seenKeys); });
       const distinctHours = new Set(parsed.map(function(r){ return r.date + '_' + r.hour; })).size;
       log(file.name + ': przetworzono ' + parsed.length + ' wierszy → ' + distinctHours + ' godzin.', parsed.length ? 'success' : 'warn');
+      // F37: kompletność per miesiąc. Marzec 2026 przyszedł jako 671 z 743 h
+      // i aplikacja to przemilczała, zaniżając depozyt o 3 doby.
+      const perMonth = {};
+      parsed.forEach(function(r){
+        const mk = r.date.slice(0, 7);
+        (perMonth[mk] = perMonth[mk] || new Set()).add(r.date + '_' + r.hour);
+      });
+      const nowMk = V.localHourLabel(Date.now()).date.slice(0, 7);
+      Object.keys(perMonth).sort().forEach(function(mk){
+        if (mk === nowMk) return; // bieżący miesiąc jest niepełny z natury
+        const y = Number(mk.slice(0, 4)), mo = Number(mk.slice(5, 7));
+        const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
+        let expected = 0;
+        for (let d = 1; d <= daysInMonth; d++){
+          // Liczymy UNIKALNE etykiety godzin, nie rzeczywiste godziny.
+          // Jesienią (25.10) doba ma 25 h, ale eLicznik numeruje 1-24, więc
+          // powtórzona 02:00 skleja się w jeden klucz -> 744, nie 745.
+          // Bez tego min() październik dostawał fałszywy brak 1 h.
+          expected += Math.min(24, V.expectedHoursInDay(mk + '-' + String(d).padStart(2, '0')));
+        }
+        const got = perMonth[mk].size;
+        if (got < expected){
+          log(file.name + ': ' + V.escapeHtml(mk) + ' ma tylko ' + got + ' z ' + expected
+            + ' godzin — brakuje ' + (expected - got) + ' h. Depozyt za ten miesiąc będzie ZANIŻONY. '
+            + 'Pobierz z eLicznika pełny zakres.', 'warn');
+        }
+      });
     } catch(e){
       log(file.name + ': błąd wczytywania — ' + e.message, 'error');
     }
@@ -1433,18 +1461,32 @@ async function handleHaStatsFiles(fileList){
       // S1: było (m.haPobor||0) + h.poborHa — ponowne wgranie tego samego pliku
       // DUBLOWAŁO dane (50 → 100 kWh). Plik jest pełnym eksportem zakresu,
       // więc musi PODMIENIAĆ wartości, nie dodawać do istniejących.
-      Object.keys(monthly).forEach(function(mk){
+      // Miesiąc może mieć odrzucenia, ale zero przyjętych godzin — dlatego
+      // iterujemy po SUMIE kluczy, nie tylko po monthly.
+      const rejByMonth = (parsed.rejected && parsed.rejected.byMonth) || {};
+      const allKeys = Object.keys(monthly).concat(
+        Object.keys(rejByMonth).filter(function(k){ return !monthly[k]; }));
+      allKeys.forEach(function(mk){
         if (!state.months[mk]) state.months[mk] = {kosztEnergii:0, kosztDystrybucji:0, manual:false};
         const m = state.months[mk];
         const h = monthly[mk];
-        m.haProdukcja = round2(h.produkcja);
-        m.haOddanie = round2(h.oddanieHa);
-        m.haPobor = round2(h.poborHa);
-        m.haZuzycieDomu = round2(h.zuzycieDomu);
-        m.haLadowanie = round2(h.ladowanie);
-        m.haRozladowanie = round2(h.rozladowanie);
-        state.haRejected[mk] = parsed.rejected;
-        if (parsed.hourly[mk]) state.haHourly[mk] = parsed.hourly[mk];
+        if (h){
+          m.haProdukcja = round2(h.produkcja);
+          m.haOddanie = round2(h.oddanieHa);
+          m.haPobor = round2(h.poborHa);
+          m.haZuzycieDomu = round2(h.zuzycieDomu);
+          m.haLadowanie = round2(h.ladowanie);
+          m.haRozladowanie = round2(h.rozladowanie);
+        }
+        // F31: było `= parsed.rejected` — jeden globalny summary dla każdego
+        // miesiąca. Nagłówek sumował to 9 razy (192 h -> 1728 h).
+        state.haRejected[mk] = rejByMonth[mk] || {total:0, rejectedKwh:0, byRole:{}};
+        if (parsed.hourly[mk]){
+          state.haHourly[mk] = parsed.hourly[mk];
+          // F32: pokrycie godzinowe, żeby nie traktować niepełnego miesiąca
+          // jak pełnego przy ekstrapolacji rocznej.
+          m.haHours = parsed.hourly[mk].length;
+        }
       });
     } catch(e){
       log(file.name + ': błąd wczytywania — ' + e.message, 'error');
@@ -1842,6 +1884,10 @@ function renderRealBattery(){
     return;
   }
   let sumCharge=0, sumDischarge=0, sumValue=0, monthsWithValue=0, sumGridKwh=0, sumGridCost=0;
+  // F33: miesiące z niemożliwym bilansem NIE mogą wchodzić do nagłówka ROI.
+  // Wcześniej wchodziły, a tylko wiersz był oznaczony na czerwono.
+  let trustedValue=0, trustedHours=0, trustedMonths=0;
+  let flaggedValue=0, flaggedMonths=0;
   tbody.innerHTML = keys.map(function(k){
     const m = state.months[k];
     const rate = resolveEffectiveRate(k);
@@ -1856,7 +1902,15 @@ function renderRealBattery(){
     const bc = state.haBatteryCheck[k];
     sumCharge += m.haLadowanie; sumDischarge += m.haRozladowanie;
     sumGridKwh += grid.kwh; sumGridCost += gridCost;
-    if (value !== null){ sumValue += value; monthsWithValue++; }
+    if (value !== null){
+      sumValue += value; monthsWithValue++;
+      if (bc && !bc.plausible){
+        flaggedValue += value; flaggedMonths++;
+      } else {
+        trustedValue += value; trustedMonths++;
+        trustedHours += (m.haHours || (state.haHourly[k] ? state.haHourly[k].length : 0));
+      }
+    }
     const warn = (bc && !bc.plausible)
       ? ' <span class="tag-warn" style="background:#7f1d1d;color:#fff;" title="' + V.escapeHtml(bc.reason || '') + '">bilans niemożliwy</span>'
       : '';
@@ -1876,24 +1930,58 @@ function renderRealBattery(){
     '<td class="num accent-rust">' + formatPLN(-sumGridCost) + '</td>' +
     '<td class="num accent-strong">' + formatPLN(sumValue) + '</td></tr>';
 
+  // F33: pod stołem pokaż, ile z sumy pochodzi z miesięcy niewiarygodnych.
+  const noteEl = document.getElementById('realBatteryNote');
+  if (noteEl){
+    if (flaggedMonths > 0){
+      noteEl.innerHTML = '<p class="hint" style="margin:.5rem 0;padding:.5rem .7rem;'
+        + 'background:#7f1d1d22;border-left:3px solid #b91c1c;">'
+        + '<strong>Z sumy ' + formatPLN(sumValue) + ' aż ' + formatPLN(flaggedValue)
+        + ' pochodzi z ' + flaggedMonths + ' mies. z niemożliwym bilansem magazynu.</strong> '
+        + 'Te liczby nie są wiarygodne — liczniki ładowania/rozładowania są niespójne. '
+        + 'Nagłówek wyżej liczy wyłącznie pozostałe ' + formatPLN(trustedValue)
+        + ' z ' + trustedMonths + ' mies. Napraw liczniki, żeby odzyskać pełny obraz.</p>';
+    } else {
+      noteEl.innerHTML = '';
+    }
+  }
+
   if (readoutEl){
     const koszt = state.batCostPln || 0;
     if (monthsWithValue === 0){
       readoutEl.textContent = '—';
       subEl.textContent = 'wpisz „Koszt energii” w Depozycie choć dla jednego miesiąca, żeby policzyć wartość';
+    } else if (trustedMonths === 0){
+      // Wszystkie miesiące niewiarygodne — nie ma z czego liczyć zwrotu.
+      readoutEl.textContent = 'brak wiarygodnych danych';
+      subEl.textContent = 'wszystkie ' + flaggedMonths + ' mies. mają niemożliwy bilans magazynu — napraw liczniki';
     } else if (koszt <= 0){
-      readoutEl.textContent = formatPLN(sumValue);
-      subEl.textContent = 'z ' + monthsWithValue + ' mies. danych — wpisz koszt magazynu, by zobaczyć payback';
+      readoutEl.textContent = formatPLN(trustedValue);
+      subEl.textContent = 'z ' + trustedMonths + ' wiarygodnych mies. — wpisz koszt magazynu, by zobaczyć payback';
     } else {
-      const rocznie = sumValue * (12 / monthsWithValue);
-      const paybackDone = sumValue >= koszt;
-      if (paybackDone){
-        readoutEl.textContent = formatPLN(sumValue);
+      // F34: było 12 / liczba_miesięcy. Niepełny miesiąc (marzec 28 h,
+      // listopad 108 h) ważył tyle co pełny, zaniżając stawkę roczną.
+      // Liczymy po godzinach pokrycia: 8760 h w roku.
+      const rocznie = trustedHours > 0
+        ? trustedValue * (8760 / trustedHours)
+        : trustedValue * (12 / trustedMonths);
+      const pokrycie = trustedHours > 0
+        ? ('ekstrapolacja z ' + trustedHours + ' h pomiaru')
+        : ('ekstrapolacja z ' + trustedMonths + ' mies.');
+      if (trustedValue >= koszt){
+        readoutEl.textContent = formatPLN(trustedValue);
         subEl.textContent = 'magazyn już się zwrócił (koszt ' + formatPLN(koszt) + ')';
+      } else if (rocznie <= 0){
+        // F35: było „∞" bez wyjaśnienia.
+        readoutEl.textContent = 'nie zwraca się';
+        subEl.textContent = 'przy tych danych zysk roczny wynosi ' + formatPLN(rocznie)
+          + ' — koszt energii kupionej do ładowania przewyższa wartość rozładowania';
       } else {
-        const lata = rocznie > 0 ? (koszt - sumValue) / rocznie : Infinity;
-        readoutEl.textContent = isFinite(lata) ? ('~' + lata.toFixed(1) + ' lat do zwrotu') : '∞';
-        subEl.textContent = formatPLN(sumValue) + ' zaoszczędzone z ' + monthsWithValue + ' mies. (śr. ' + formatPLN(rocznie) + '/rok)';
+        const lata = (koszt - trustedValue) / rocznie;
+        readoutEl.textContent = '~' + lata.toFixed(1) + ' lat do zwrotu';
+        subEl.textContent = formatPLN(trustedValue) + ' zaoszczędzone z ' + trustedMonths
+          + ' wiarygodnych mies. (śr. ' + formatPLN(rocznie) + '/rok, ' + pokrycie
+          + '; sezony różnią się nawet 4×, więc to zgrubny szacunek)';
       }
     }
   }
@@ -1947,9 +2035,15 @@ function renderMagazyn(){
   } else {
     const rocznie = totalNetto * (12 / totalMonths);
     if (koszt > 0){
-      const lata = rocznie > 0 ? (koszt / rocznie) : Infinity;
-      readoutEl.textContent = isFinite(lata) ? ('~' + lata.toFixed(1) + ' lat') : '∞';
-      subEl.textContent = 'do zwrotu kosztu magazynu, przy ' + formatPLN(rocznie) + '/rok (ekstrapolacja z ' + totalMonths + ' mies.)';
+      if (rocznie > 0){
+        readoutEl.textContent = '~' + (koszt / rocznie).toFixed(1) + ' lat';
+        subEl.textContent = 'do zwrotu kosztu magazynu, przy ' + formatPLN(rocznie) + '/rok (ekstrapolacja z ' + totalMonths + ' mies.)';
+      } else {
+        // F35: „∞" nie mówiło użytkownikowi, że symulacja daje UJEMNY zysk.
+        readoutEl.textContent = 'nie zwraca się';
+        subEl.textContent = 'symulacja daje ' + formatPLN(rocznie) + '/rok — przy tych cenach i tym profilu '
+          + 'dodanie magazynu pogarsza wynik, a nie poprawia';
+      }
     } else {
       readoutEl.textContent = formatPLN(rocznie) + ' / rok';
       subEl.textContent = 'ekstrapolacja z ' + totalMonths + ' dostępnych miesięcy — wpisz koszt magazynu, by zobaczyć payback';
@@ -2160,7 +2254,10 @@ async function loadElicznikHourly(){
 
 async function saveState(){
   if (!storageUsable()) return;
-  try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates})); }
+  try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates,
+    // F36: bez tego po restarcie znikały oznaczenia „bilans niemożliwy”
+    // i tabela odrzuconych godzin, a zawyżone liczby zostawały.
+    haBatteryCheck: state.haBatteryCheck, haRejected: state.haRejected})); }
   catch(e){ log('Nie udało się zapisać rejestru miesięcy: ' + e.message, 'error'); }
   try{ await window.storage.set('rce-cache', JSON.stringify({v: RCE_CACHE_VERSION, data: state.rceHourly})); }
   catch(e){ log('Nie udało się zapisać cache cen RCE: ' + e.message, 'error'); }
@@ -2181,6 +2278,10 @@ async function loadState(){
           state.batEfficiency = (parsed.batEfficiency !== undefined && parsed.batEfficiency !== null) ? parsed.batEfficiency : 0.90;
           state.batCostPln = parsed.batCostPln || 0;
           state.zoneRates = parsed.zoneRates || {};
+          // F36: przywracamy diagnozę, nie tylko liczby. Bez tego restart
+          // „czyścił” ostrzeżenia, choć dane nadal były uszkodzone.
+          state.haBatteryCheck = parsed.haBatteryCheck || {};
+          state.haRejected = parsed.haRejected || {};
         } else if (parsed && typeof parsed === 'object'){
           state.months = parsed; // format sprzed dodania panelu Analiza — same miesiące bez opakowania
         }

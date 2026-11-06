@@ -127,6 +127,14 @@ function waitForServer(timeoutMs) {
   t('S26 pojemność baterii = nominalna 14,34 kWh', r.json && r.json.batteryCapacityKwh === 14.34);
   // Regresja: serwer miał własną wartość domyślną, niezależną od validate.js.
   // Przy zmianie pojemności trzeba by pamiętać o dwóch miejscach.
+  // Regresja: przez chwilę lib/validate.js miał byMonth, a serwowana kopia
+  // public/validate.js nie — frontend dostawał pusty podział odrzuceń.
+  // Test end-to-end to złapał, ale tu wykrywamy to u źródła.
+  t('S31 serwowana kopia validate.js identyczna z lib/',
+    require('fs').readFileSync(require('path').join(__dirname, '../app/lib/validate.js'), 'utf8')
+    === require('fs').readFileSync(require('path').join(__dirname, '../app/public/validate.js'), 'utf8'),
+    'pliki się różnią — uruchom: cp app/lib/validate.js app/public/validate.js');
+
   const Vcheck = require('../app/lib/validate');
   t('S30 serwer i walidator zgadzają się co do pojemności',
     r.json && r.json.batteryCapacityKwh === Vcheck.resolveConfig().batteryCapacityKwh,

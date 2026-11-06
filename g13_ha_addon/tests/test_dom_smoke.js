@@ -215,6 +215,92 @@ function serveDir(dir) {
     logWithPrice.includes('godzin eLicznika z poprzedniej sesji') && !logWithPrice.includes('brak cen RCE'));
   dWithPrice.window.close();
 
+  console.log('\n=== F31/F33/F36: zakładka Magazyn na realnych liczbach ===');
+  // Liczby z rzeczywistego widoku użytkownika (stawka 0,63 zł/kWh).
+  // Wrzesień i październik mają niemożliwy bilans magazynu.
+  const ledger = {
+    months: {
+      '2026-05': { kosztEnergii: 630, poborKwh: 1000, haLadowanie: 346.2, haRozladowanie: 318.4, haHours: 744 },
+      '2026-07': { kosztEnergii: 630, poborKwh: 1000, haLadowanie: 355.3, haRozladowanie: 327.2, haHours: 733 },
+      '2026-09': { kosztEnergii: 630, poborKwh: 1000, haLadowanie: 347.5, haRozladowanie: 395.1, haHours: 720 },
+      '2026-10': { kosztEnergii: 630, poborKwh: 1000, haLadowanie: 325.2, haRozladowanie: 453.7, haHours: 744 },
+    },
+    batCostPln: 5990,
+    haBatteryCheck: {
+      '2026-05': { plausible: true, ratio: 0.95, socRange: 13.7 },
+      '2026-07': { plausible: true, ratio: 1.11, socRange: 15.9 },
+      '2026-09': { plausible: false, ratio: 6.41, socRange: 91.9, hardImpossible: true, hardExcess: 33.26, reason: 'liczniki niespójne' },
+      '2026-10': { plausible: false, ratio: 11.12, socRange: 159.4, hardImpossible: true, hardExcess: 114.06, reason: 'liczniki niespójne' },
+    },
+    haRejected: {
+      '2026-05': { total: 23, rejectedKwh: -2.7, byRole: { poborHa: { count: 23 } } },
+      '2026-07': { total: 42, rejectedKwh: 2949.2, byRole: { poborHa: { count: 42 } } },
+    },
+  };
+  const dBat = await loadWithCache(null, { 'monthly-ledger': JSON.stringify(ledger) });
+  const doc = dBat.window.document;
+  const head = (doc.getElementById('readoutRealBatterySub') || {}).textContent || '';
+  const note = (doc.getElementById('realBatteryNote') || {}).textContent || '';
+  const foot = (doc.getElementById('realBatteryFoot') || {}).textContent || '';
+
+  // SUMA wszystkich = (318,4+327,2+395,1+453,7) x 0,63 = 941,47 zł
+  // Zaufane (maj+lipiec) = (318,4+327,2) x 0,63 = 406,73 zł
+  t('D20 nagłówek ROI wyklucza miesiące z niemożliwym bilansem',
+    head.includes('406,73') && head.includes('wiarygodnych'),
+    'nagłówek: ' + head);
+  t('D21 pod tabelą pokazane, ile odrzucono z sumy',
+    note.includes('534,74') && note.includes('niemożliwym bilansem'),
+    'nota: ' + note);
+  t('D22 tabela nadal pokazuje pełną sumę (nic nie ukryte)',
+    foot.includes('941,47'), 'stopka: ' + foot);
+  t('D23 flagi usterek przetrwały restart (F36)',
+    (doc.getElementById('realBatteryBody') || {}).textContent.includes('bilans niemożliwy'),
+    'wiersze bez oznaczeń');
+  const diag = (doc.getElementById('haDiagnostics') || {}).textContent || '';
+  t('D24 licznik odrzuceń = 65 h, nie 65 × liczba miesięcy',
+    diag.includes('Odrzucono 65 godzin') && !diag.includes('Odrzucono 130'),
+    'diagnostyka: ' + diag.slice(0, 160));
+  // Tabela odrzuceń to pierwsza <table> w panelu. Musi mieć 2 wiersze
+  // (maj, lipiec), a nie 4 — wrzesień i październik nie odrzuciły godzin,
+  // mają osobny problem (bilans baterii), pokazany niżej.
+  const diagHtml = (doc.getElementById('haDiagnostics') || {}).innerHTML || '';
+  const firstTable = diagHtml.slice(0, diagHtml.indexOf('</table>') + 8);
+  const bodyRows = (firstTable.match(/<tr>/g) || []).length - 1; // minus nagłówek
+  t('D25 tabela odrzuceń ma 2 wiersze, nie 4', bodyRows === 2,
+    'wierszy: ' + bodyRows);
+  dBat.window.close();
+
+  // D26/D27: przebieg przez PRAWDZIWE wgranie pliku, nie przez seed KV.
+  // Mutacja F31 (powrót do `= parsed.rejected`) nie była łapana przez D24/D25,
+  // bo tam haRejected przychodziło już podzielone z KV.
+  const { CSV } = require('./fixture');
+  if (CSV) {
+    console.log('\n=== F31 end-to-end: wgranie realnego eksportu HA ===');
+    const dUp = await loadWithCache(null, {});
+    const w = dUp.window, d = w.document;
+    const csvText = fs.readFileSync(CSV, 'utf8');
+    const file = new w.File([csvText], 'growatt-ha-auto-sync.csv', { type: 'text/csv' });
+    // jsdom w tej wersji nie ma File.text() (przeglądarki mają) — uzupełniamy
+    // wyłącznie brak harnessu, nie zachowanie aplikacji.
+    if (typeof file.text !== 'function') file.text = () => Promise.resolve(csvText);
+    const input = d.getElementById('fileHaStats');
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new w.Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 4000));
+    const diagUp = (d.getElementById('haDiagnostics') || {}).textContent || '';
+    const m = diagUp.match(/Odrzucono (\d+) godzin/);
+    t('D26 nagłówek odrzuceń = 192 h (nie 192 × 9 = 1728)',
+      m && m[1] === '192', 'nagłówek: ' + (m ? m[1] : 'brak'));
+    const upHtml = (d.getElementById('haDiagnostics') || {}).innerHTML || '';
+    const tbl = upHtml.slice(0, upHtml.indexOf('</table>') + 8);
+    const nRows = (tbl.match(/<tr>/g) || []).length - 1;
+    t('D27 tabela odrzuceń ma 5 wierszy (marzec–lipiec), nie 9',
+      nRows === 5, 'wierszy: ' + nRows);
+    dUp.window.close();
+  } else {
+    console.log('\n  (pominięto D26/D27 — brak realnego CSV; ustaw G13_TEST_CSV)');
+  }
+
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
   if (errors.length) console.log('\nZebrane błędy (pierwsze 5):\n' + errors.slice(0, 5).join('\n'));
