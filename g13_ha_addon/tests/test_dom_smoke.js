@@ -122,8 +122,9 @@ function serveDir(dir) {
   // Strona SAMA definiuje window.storage (shim na fetch do api/kv), więc
   // podstawienie window.storage w beforeParse nie działa — zostanie nadpisane.
   // Podmieniamy fetch, czyli warstwę, z której ten shim faktycznie korzysta.
-  async function loadWithCache(cacheValue, extraKv, apiConfig) {
+  async function loadWithCache(cacheValue, extraKv, apiConfig, apiCsv) {
     const kv = Object.assign({ 'rce-cache': cacheValue }, extraKv || {});
+    const calls = [];
     const dom2 = await JSDOM.fromURL(`http://127.0.0.1:${port}/index.html`, {
       runScripts: 'dangerously',
       resources: 'usable',
@@ -132,6 +133,15 @@ function serveDir(dir) {
         window.XLSX = { read: () => ({ SheetNames: ['a'], Sheets: { a: {} } }), utils: { sheet_to_json: () => [] } };
         window.fetch = (url, opts) => {
           const u = String(url);
+          calls.push(u);
+          // F40: eksport encji. Odpowiedź podstawialna, żeby sprawdzić
+          // ścieżkę pustą i ścieżkę z danymi.
+          if (/api\/ha\/stats\.csv/.test(u)) {
+            if (apiCsv === null || apiCsv === undefined) {
+              return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: 'not_found' }), text: () => Promise.resolve('') });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(apiCsv), json: () => Promise.resolve({}) });
+          }
           // F39: /api/config musi dać się podstawć, żeby sprawdzić, czy opcje
           // dodatku naprawdę docierają do walidatora w przeglądarce.
           if (apiConfig && /api\/config/.test(u)) {
@@ -164,6 +174,7 @@ function serveDir(dir) {
     });
     await new Promise(r => setTimeout(r, 1500));
     dom2.__kv = kv;
+    dom2.__calls = calls;
     return dom2;
   }
 
@@ -305,6 +316,15 @@ function serveDir(dir) {
     t('D28 domyślna pojemność w diagnozie = 14.34 kWh (nie 16.35)',
       capDefault && capDefault[1] === '14.34',
       'znaleziono: ' + (capDefault ? capDefault[1] : 'brak'));
+    // D6: ostrzeżenie o niemożliwej SUMIE musi się wyrenderować po wgraniu,
+    // a nie tylko istnieć jako funkcja w walidatorze.
+    const noteTxt = (d.getElementById('realBatteryNote') || {}).textContent || '';
+    t('D30 pod tabelą jest ostrzeżenie o fizycznie niemożliwej SUMIE',
+      /SUMA jest fizycznie niemożliwy/.test(noteTxt),
+      'notatka: ' + noteTxt.slice(0, 160));
+    t('D31 ostrzeżenie podaje nadmiar w kWh',
+      /nadmiar\s+[\d.,]+\s*kWh/i.test(noteTxt),
+      'notatka: ' + noteTxt.slice(0, 200));
     dUp.window.close();
 
     // F39: opcja battery_capacity_kwh ustawiona w HA musi nadpisać domyślną
@@ -327,6 +347,62 @@ function serveDir(dir) {
   } else {
     console.log('\n  (pominięto D26–D29 — brak realnego CSV; ustaw G13_TEST_CSV)');
   }
+
+  console.log('\n=== F40: eksport encji musi używać adresu WZGLĘDNEGO ===');
+  // Regresja z produkcji: użytkownik składał adres ręcznie i trafiał w powłokę
+  // SPA Home Assistant, bo prefiks nie był trasą do dodatku. Przycisk musi
+  // wołać 'api/ha/stats.csv' względnie, tak jak window.storage woła 'api/kv'.
+  const CSV_OK = 'statistic_id,start,start_utc,mean,min,max\n'
+    + 'sensor.jk_bms_current,2026-09-28 02:00:00,2026-09-28T00:00:00Z,-5.4,-5.9,-5.1\n';
+  const dExp = await loadWithCache(null, {}, undefined, CSV_OK);
+  const we = dExp.window, de = we.document;
+  // jsdom nie ma URL.createObjectURL — uzupełniamy wyłącznie brak harnessu.
+  we.URL.createObjectURL = () => 'blob:stub';
+  we.URL.revokeObjectURL = () => {};
+  t('D32 przycisk eksportu istnieje', !!de.getElementById('btnExportEntities'));
+  de.getElementById('inputExportEntities').value = '';
+  de.getElementById('btnExportEntities').click();
+  await new Promise(r => setTimeout(r, 200));
+  t('D33 puste pole → ostrzeżenie, bez żadnego żądania',
+    /Wpisz co najmniej jedno/.test(de.getElementById('exportEntitiesStatus').textContent)
+    && !dExp.__calls.some(u => /api\/ha\/stats\.csv/.test(u)),
+    'status: ' + de.getElementById('exportEntitiesStatus').textContent);
+  de.getElementById('inputExportEntities').value = 'sensor.JK_BMS_Current';
+  de.getElementById('btnExportEntities').click();
+  await new Promise(r => setTimeout(r, 200));
+  t('D34 wielkie litery w entity_id odrzucone przed żądaniem',
+    /Nieprawidłowe entity_id/.test(de.getElementById('exportEntitiesStatus').textContent),
+    'status: ' + de.getElementById('exportEntitiesStatus').textContent);
+  de.getElementById('inputExportEntities').value = 'sensor.jk_bms_current, sensor.jk_bms_total_voltage';
+  de.getElementById('inputExportStart').value = '2026-09-20';
+  de.getElementById('inputExportEnd').value = '2026-10-16';
+  de.getElementById('btnExportEntities').click();
+  await new Promise(r => setTimeout(r, 400));
+  const expCall = dExp.__calls.filter(u => /api\/ha\/stats\.csv/.test(u)).pop();
+  t('D35 żądanie idzie pod adres WZGLĘDNY api/ha/stats.csv',
+    !!expCall && expCall.startsWith('api/ha/stats.csv?'),
+    'wołano: ' + expCall);
+  t('D36 zakodowane entities, start, end i types=mean,min,max',
+    !!expCall && /entities=sensor\.jk_bms_current(%2C|,)sensor\.jk_bms_total_voltage/.test(expCall)
+    && /start=2026-09-20/.test(expCall) && /end=2026-10-16/.test(expCall)
+    && /types=mean(%2C|,)min(%2C|,)max/.test(expCall),
+    'wołano: ' + expCall);
+  t('D37 sukces raportuje liczbę wierszy',
+    /Pobrano 1 wierszy/.test(de.getElementById('exportEntitiesStatus').textContent),
+    'status: ' + de.getElementById('exportEntitiesStatus').textContent);
+  dExp.window.close();
+
+  const dEmpty = await loadWithCache(null, {}, undefined, 'statistic_id,start,start_utc,mean,min,max\n');
+  const wq = dEmpty.window, dq = wq.document;
+  wq.URL.createObjectURL = () => 'blob:stub';
+  wq.URL.revokeObjectURL = () => {};
+  dq.getElementById('inputExportEntities').value = 'sensor.bez_state_class';
+  dq.getElementById('btnExportEntities').click();
+  await new Promise(r => setTimeout(r, 400));
+  t('D38 pusty plik → podpowiedź o state_class, nie cichy sukces',
+    /state_class/.test(dq.getElementById('exportEntitiesStatus').textContent),
+    'status: ' + dq.getElementById('exportEntitiesStatus').textContent);
+  dEmpty.window.close();
 
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);

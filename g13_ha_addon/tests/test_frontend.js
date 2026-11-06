@@ -218,6 +218,45 @@ if (CSV) {
     assert.ok(b.hardExcess > 100, 'nadmiar ' + b.hardExcess);
   });
 
+  console.log('\n=== D6: bilans ZBIORCZY (wiersz SUMA) ===');
+  // Regresja: SUMA pokazywała 2452,3 kWh rozładowania z 2409,9 kWh ładowania
+  // bez żadnego komentarza. Test miesięczny tego nie łapie, bo nadmiar
+  // narasta dopiero w całym okresie.
+  // Agregujemy z haHourly — w tym miejscu testu state.months nie ma jeszcze
+  // przepisanych sum HA, a haHourly jest ustawione przez runBatteryValidation.
+  const monthSums = {};
+  Object.keys(sandbox.state.haHourly).forEach(k => {
+    let c = 0, d = 0;
+    sandbox.state.haHourly[k].forEach(h => { c += h.ladowanie || 0; d += h.rozladowanie || 0; });
+    monthSums[k] = { ladowanie: c, rozladowanie: d };
+  });
+  const tot = V.validateBatteryTotal(Object.values(monthSums), V.resolveConfig());
+  t('B4 bilans zbiorczy realnych danych jest niemożliwy', () => {
+    assert.ok(tot.impossible, 'SUMA musi być oznaczona: ' + JSON.stringify(tot));
+    assert.ok(tot.discharge > tot.charge, 'rozładowanie > ładowanie');
+    assert.ok(tot.excess > 200 && tot.excess < 240, 'nadmiar ' + tot.excess);
+  });
+  t('B5 podzbiór wiarygodny domyka się przy η=0,92', () => {
+    const trusted = Object.keys(monthSums).filter(k => {
+      const bc = sandbox.state.haBatteryCheck[k];
+      return !bc || bc.plausible;
+    }).map(k => monthSums[k]);
+    const tr = V.validateBatteryTotal(trusted, V.resolveConfig());
+    assert.ok(!tr.impossible, 'wiarygodne miesiące nie mogą być niemożliwe');
+    const eff = tr.discharge / tr.charge;
+    assert.ok(Math.abs(eff - 0.92) < 0.01, 'sprawność podzbioru ' + eff.toFixed(4));
+  });
+  t('B6 start z pełnej paczki NIE jest fałszywym alarmem', () => {
+    // 10 kWh naładowane, 20 kWh oddane, paczka 14,34 → max 0,92×24,34 = 22,4
+    const r = V.validateBatteryTotal([{ ladowanie: 10, rozladowanie: 20 }], V.resolveConfig());
+    assert.ok(!r.impossible, 'krótki okres z pełnym startem musi przejść: ' + JSON.stringify(r));
+  });
+  t('B7 pusty okres nie jest alarmem', () => {
+    const r = V.validateBatteryTotal([], V.resolveConfig());
+    assert.ok(!r.impossible);
+    assert.strictEqual(r.months, 0);
+  });
+
   console.log('\n=== F37: kompletność miesiąca (marzec 2026 = 743 h) ===');
   t('K1 marzec 2026 ma 743 h (zmiana czasu 29.03)', () => {
     let sum = 0;

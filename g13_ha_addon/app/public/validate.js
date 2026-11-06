@@ -230,6 +230,59 @@
     };
   }
 
+  /*--------------------------------------------------------------------------
+   * validateBatteryTotal — D6: bilans ZBIORCZY całego okresu.
+   *
+   * Test miesięczny łapie pojedyncze miesiące, ale wiersz SUMA mógł pokazywać
+   * więcej rozładowania niż ładowania bez żadnego komentarza. Na realnych
+   * danych: 2442,1 kWh oddane z 2398,9 kWh przyjętych.
+   *
+   * Maksimum fizyczne: cała energia weszła przy sprawności η, a bateria
+   * wystartowała PEŁNA i skończyła PUSTA:
+   *     maxDischarge = η × (charge + capacity)
+   * To zawyżenie na korzyść danych — realnie bateria nie zaczyna okresu
+   * pełna ani nie kończy pusta. Jeśli mimo tego rozładowanie jest większe,
+   * liczniki są niespójne.
+   *
+   * Uwaga: sama sprawność pozorna (discharge/charge) nie wystarcza jako test,
+   * bo dla krótkiego okresu start z pełnej paczki może ją legalnie podnieść.
+   * ------------------------------------------------------------------------*/
+  function validateBatteryTotal(months, cfg) {
+    const c = cfg || resolveConfig();
+    const cap = c.batteryCapacityKwh;
+    const eta = c.batteryEta;
+    let charge = 0, discharge = 0, n = 0;
+    (months || []).forEach(function (m) {
+      if (!m) return;
+      const ch = Number(m.ladowanie), dis = Number(m.rozladowanie);
+      if (isFinite(ch)) charge += ch;
+      if (isFinite(dis)) discharge += dis;
+      n++;
+    });
+    const maxDischarge = eta * (charge + cap);
+    const excess = discharge - maxDischarge;
+    // Próg 0,5 kWh jak w twardym limicie miesięcznym — poniżej tego to szum
+    // zaokrągleń liczników (0,1 kWh na godzinę).
+    const impossible = excess > 0.5;
+    return {
+      months: n,
+      charge: round2(charge),
+      discharge: round2(discharge),
+      capacity: cap,
+      eta: eta,
+      apparentEfficiency: charge > 0 ? round2(discharge / charge * 100) : null,
+      maxDischarge: round2(maxDischarge),
+      excess: round2(excess),
+      impossible: impossible,
+      reason: impossible
+        ? ('rozładowano ' + discharge.toFixed(1) + ' kWh z ' + charge.toFixed(1)
+           + ' kWh naładowanych; maksimum przy sprawności ' + eta.toFixed(2)
+           + ' i starcie z pełnej paczki to ' + maxDischarge.toFixed(1)
+           + ' kWh — nadmiar ' + excess.toFixed(1) + ' kWh')
+        : null,
+    };
+  }
+
   /* --------------------------------------------------------------------------
    * monthKeyFromUtc — klucz miesiąca w czasie LOKALNYM (Europe/Warsaw).
    *
@@ -450,6 +503,7 @@
     acceptDelta,
     createRejectionLog,
     validateBatteryMonth,
+    validateBatteryTotal,
     monthKeyFromUtc,
     hourKeyFromUtc,
     localHourLabel,
