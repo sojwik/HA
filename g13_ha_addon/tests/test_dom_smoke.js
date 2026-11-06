@@ -498,6 +498,56 @@ function serveDir(dir) {
       + ' | tag: ' + (restoredTag ? restoredTag.textContent : 'brak'));
   dRestore.window.close();
 
+  console.log('\n=== D45–D47: różne pokrycie i brak danych PV (0.3.1) ===');
+  // Marzec w realnych danych: liczniki BMS od ~17.03, eksport Growatt od 30.03.
+  // BMS ma 200 h, Growatt 4 h. Sumy są nieporównywalne, a produkcja niezmierzona.
+  function marchFixture(){
+    const lines = ['statistic_id,start,start_utc,sum,delta,delta_sum'];
+    const t0 = Date.UTC(2026, 2, 17, 0);
+    function add(id, from, n, val){
+      let sum = 0;
+      for (let i = 0; i < n; i++){
+        const ts = t0 + (from + i) * 3600000;
+        sum += val;
+        const utc = new Date(ts).toISOString().slice(0, 19) + 'Z';
+        const loc = new Date(ts + 3600000).toISOString().slice(0, 19).replace('T', ' ');
+        lines.push([id, loc, utc, sum.toFixed(4), val, val].join(','));
+      }
+    }
+    add(BMS_CH_ID, 0, 200, 0.70);
+    add(BMS_DIS_ID, 0, 200, 0.68);
+    add('sensor.growatt_solar_energy_total', 196, 4, 0.0);
+    add('sensor.growatt_battery_battery_charge_total', 196, 4, 0.70);
+    add('sensor.growatt_battery_battery_discharge_total', 196, 4, 0.68);
+    return lines.join('\n') + '\n';
+  }
+  const dMar = await loadWithCache(null, {}, cfgBms, undefined, marchFixture());
+  const dm = dMar.window.document;
+  const cmpRow = dm.getElementById('bmsCompareBody').textContent;
+  t('D45 różne pokrycie NIE jest zgłaszane jako usterka',
+    !/UWAGA/.test(dm.getElementById('bmsCompareStatus').textContent)
+      && /niemiarodajne/.test(dm.getElementById('bmsCompareNote').textContent),
+    'status: ' + dm.getElementById('bmsCompareStatus').textContent
+      + ' | note: ' + dm.getElementById('bmsCompareNote').textContent.slice(0, 200));
+  t('D46 miesiąc bez pomiaru PV oznaczony i wyłączony z zysku',
+    /brak danych PV/.test(dm.getElementById('realBatteryBody').textContent)
+      && /brak pomiaru produkcji/.test(dm.getElementById('realBatteryNote').textContent),
+    'wiersz: ' + dm.getElementById('realBatteryBody').textContent.slice(0, 200)
+      + ' | note: ' + dm.getElementById('realBatteryNote').textContent.slice(0, 200));
+  dMar.window.close();
+
+  const dExp2 = await loadWithCache(null, {}, undefined, 'statistic_id,start,start_utc,change,sum\nsensor.bms_ch_total,2026-10-01 02:00:00,2026-10-01T00:00:00Z,1.5,10.5\n');
+  const we2 = dExp2.window, de2 = we2.document;
+  we2.URL.createObjectURL = () => 'blob:stub';
+  we2.URL.revokeObjectURL = () => {};
+  de2.getElementById('inputExportEntities').value = BMS_CH_ID;
+  de2.getElementById('btnExportEntities').click();
+  await new Promise(r => setTimeout(r, 400));
+  const expCall2 = dExp2.__calls.filter(u => /api\/ha\/stats\.csv/.test(u))[0] || '';
+  t('D47 eksport prosi o change i sum (liczniki energii)',
+    /change/.test(expCall2) && /sum/.test(expCall2), 'URL: ' + expCall2);
+  dExp2.window.close();
+
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
   if (errors.length) console.log('\nZebrane błędy (pierwsze 5):\n' + errors.slice(0, 5).join('\n'));

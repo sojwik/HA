@@ -40,15 +40,22 @@
     // nie nominalne, i zawyżało pojemność o 14%.
     batteryCapacityKwh: 14.34,
     batteryEta: 0.92,
-    // Sprawność po stronie DC, czyli tam, gdzie mierzy BMS. Wyznaczona z TYCH
-    // SAMYCH 46 zdrowych dób, na których wyznaczono 0.92 dla AC:
-    //   BMS (DC):      524,9 / 562,2 = 0,9335
-    //   Growatt (AC):  514,9 / 562,7 = 0,9151
-    // Różnica 2% to strata falownika. Zaokrąglone w górę tak samo jak 0.92
-    // względem zmierzonego 0.9171 — żeby nie robić fałszywych alarmów.
-    // Bez tego październik liczony z BMS (338,3 / 347,8 = 0,973) nadal byłby
-    // oznaczony jako niemożliwy, mimo że jest w pełni poprawny.
-    batteryEtaDc: 0.94,
+    // Sprawność po stronie DC, czyli tam, gdzie mierzy BMS.
+    //
+    // KOREKTA 0.3.1. W 0.3.0 stało tu 0.94, wyznaczone z 46 dób
+    // (wrzesień/październik poza oknem usterki). Ten podzbiór był
+    // NIEREPREZENTATYWNY — na produkcji oznaczył 7 zdrowych miesięcy jako
+    // niemożliwe i zbił wiarygodne ROI z 1309 zł do 29,65 zł.
+    //
+    // Właściwa podstawa: 5 miesięcy z pełnym pokryciem OBU źródeł
+    // (kwiecień–sierpień 2026), gdzie Growatt i BMS zgadzają się na 1–5%:
+    //   BMS (DC):      1581,7 / 1630,2 = 0,9702
+    //   Growatt (AC):  1516,4 / 1638,9 = 0,9253
+    //   cały okres:    2491,3 / 2581,0 = 0,9652
+    // Różnica DC vs AC to 4,9% — strata falownika, nie błąd pomiaru.
+    // Minimum, żeby bilans zbiorczy się domknął, to 0,9599.
+    // 0.97 potwierdzone na produkcji: wszystkie 9 miesięcy przeszło.
+    batteryEtaDc: 0.97,
     maxGapHours: 24,       // dłuższa luka → nie ufamy delcie jako jednemu oknu
     // BMS vs Growatt (audyt cz. 12). Poza oknem usterki źródła różniły się
     // o 0,1% (ładowanie) i 1,9% (rozładowanie) — to strata falownika DC→AC.
@@ -357,14 +364,22 @@
     // Pokrycie względem Growatt. Gdy Growatt nie ma godzin, a BMS ma —
     // BMS jest jedynym źródłem i pokrycie traktujemy jako pełne.
     const coverage = gH > 0 ? bH / gH : (bH > 0 ? 1 : null);
-    const dCh = (hasBms && bCh > 0) ? (gCh - bCh) / bCh * 100 : null;
-    const dDis = (hasBms && bDis > 0) ? (gDis - bDis) / bDis * 100 : null;
+    // F47: SYMETRYCZNA porównywalność. Samo `coverage` pilnowało tylko
+    // przypadku, gdy BMS ma MNIEJ godzin. Odwrotny był niepilnowany i dawał
+    // fałszywy alarm: marzec 2026 ma 4 h Growatt (eksport startuje 30.03)
+    // i ~350 h BMS, więc porównanie sum dawało −96% i krzyczało „usterka”,
+    // choć Growatt po prostu wtedy nie logował. Procent ma sens tylko wtedy,
+    // gdy oba źródła opisują ten sam okres.
+    const overlap = (gH > 0 && bH > 0) ? Math.min(gH, bH) / Math.max(gH, bH) : null;
+    const comparable = overlap !== null && overlap >= c.bmsMinCoverage;
+    const dCh = (comparable && bCh > 0) ? (gCh - bCh) / bCh * 100 : null;
+    const dDis = (comparable && bDis > 0) ? (gDis - bDis) / bDis * 100 : null;
     const worst = Math.max(dCh === null ? 0 : Math.abs(dCh),
                            dDis === null ? 0 : Math.abs(dDis));
     // Procent wobec zera jest nieokreślony, więc różnicę 0 vs coś łapiemy
     // bezwzględnie. Próg 0,5 kWh jak w twardym limicie bilansu.
-    const zeroMismatch = hasBms && ((bCh === 0 && gCh > 0.5) || (bDis === 0 && gDis > 0.5));
-    const suspect = hasBms && (worst > c.bmsTolerancePct || zeroMismatch);
+    const zeroMismatch = comparable && ((bCh === 0 && gCh > 0.5) || (bDis === 0 && gDis > 0.5));
+    const suspect = comparable && (worst > c.bmsTolerancePct || zeroMismatch);
 
     const out = {
       source: 'growatt',
@@ -381,15 +396,30 @@
       chargeDeltaPct: dCh === null ? null : round2(dCh),
       dischargeDeltaPct: dDis === null ? null : round2(dDis),
       suspect: suspect,
+      comparable: comparable,
       partial: false,
       reason: null,
     };
     if (!hasBms) return out;
 
-    if (gH > 0 && coverage < c.bmsMinCoverage) {
-      out.partial = true;
-      out.reason = 'BMS pokrywa tylko ' + Math.round(coverage * 100) + '% godzin Growatt ('
-        + bH + ' z ' + gH + ') — zostaję przy Growatt, żeby nie zaniżyć miesiąca.';
+    if (!comparable) {
+      // Nie jest to usterka żadnego źródła — to różne okresy pomiaru.
+      // Wybieramy to z pełniejszym pokryciem, ale nie straszymy procentem.
+      //
+      // `partial` zostaje, bo znaczy coś innego niż `comparable`: BMS ma
+      // ZA MAŁO godzin, żeby zastąpić pełny miesiąc Growatt. To wciąż musi
+      // być widoczne w UI. Bez tego warunek byłby martwy — coverage < 0.90
+      // zawsze daje overlap < 0.90, czyli tę gałąź.
+      out.partial = gH > 0 && coverage < c.bmsMinCoverage;
+      out.source = bH >= gH ? 'bms' : 'growatt';
+      if (out.source === 'bms') { out.charge = round2(bCh); out.discharge = round2(bDis); }
+      out.reason = out.partial
+        ? ('BMS pokrywa tylko ' + Math.round(coverage * 100) + '% godzin Growatt ('
+           + bH + ' z ' + gH + ') — zostaję przy Growatt, żeby nie zaniżyć miesiąca. '
+           + 'Porównanie procentowe byłoby niemiarodajne.')
+        : ('Porównanie niemiarodajne: Growatt ma ' + gH + ' h, BMS ' + bH
+           + ' h — to różne okresy, nie usterka licznika. Użyłem '
+           + (out.source === 'bms' ? 'BMS' : 'Growatt') + ' (pełniejsze pokrycie).');
       return out;
     }
 

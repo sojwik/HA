@@ -208,8 +208,10 @@ function waitForServer(timeoutMs) {
   t('S44 domyślnie BMS wyłączony (puste, nie undefined)',
     r.json.bmsChargeEntity === '' && r.json.bmsDischargeEntity === '', JSON.stringify(r.json));
   t('S45 /api/config wystawia próg tolerancji', r.json.bmsTolerancePct === 10, String(r.json.bmsTolerancePct));
+  // 0.3.1: było 0.94, wyznaczone z niereprezentatywnej próbki 46 dob.
+  // Poprawna wartość z 5 miesięcy z pełnym pokryciem obu źródeł to 0.9702.
   t('S53 /api/config wystawia sprawność DC osobno od AC',
-    r.json.batteryEtaDc === 0.94 && r.json.batteryEta === 0.92,
+    r.json.batteryEtaDc === 0.97 && r.json.batteryEta === 0.92,
     'DC=' + r.json.batteryEtaDc + ' AC=' + r.json.batteryEta);
 
   // Drugi i trzeci proces: PRAWDZIWY server.js, tylko ha-ws podstawiony, żeby

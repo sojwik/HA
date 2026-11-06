@@ -349,6 +349,34 @@ t('M13 suma miesza źródła: każdy miesiąc z własną sprawnością', () => {
   assert.strictEqual(r.eta, 0.93, 'sprawność efektywna ważona ładowaniem');
   assert.strictEqual(r.impossible, false);
 });
+t('M14 marzec: Growatt 4 h, BMS 350 h → bez alarmu, wygrywa BMS', () => {
+  // Realny marzec 2026: eksport Growatt startuje 30.03 20:00, liczniki BMS
+  // działają od ~17.03. To NIE jest usterka — to różne okresy pomiaru.
+  const r = RC({ charge: 5.7, discharge: 6.7, hours: 4 },
+               { charge: 152.7, discharge: 151.0, hours: 350 }, rcCfg);
+  assert.strictEqual(r.source, 'bms');
+  assert.strictEqual(r.suspect, false, 'różne pokrycie to nie usterka licznika');
+  assert.strictEqual(r.comparable, false);
+  assert.strictEqual(r.chargeDeltaPct, null, 'procent byłby fikcją');
+  assert.strictEqual(r.dischargeDeltaPct, null);
+  assert.strictEqual(r.partial, false, 'BMS ma WIĘCEJ godzin, nie mniej');
+  assert.ok(/4 h/.test(r.reason) && /350 h/.test(r.reason), r.reason);
+});
+t('M15 odwrotnie: Growatt 350 h, BMS 4 h → zostaje Growatt, partial', () => {
+  const r = RC({ charge: 152.7, discharge: 151.0, hours: 350 },
+               { charge: 5.7, discharge: 6.7, hours: 4 }, rcCfg);
+  assert.strictEqual(r.source, 'growatt');
+  assert.strictEqual(r.partial, true);
+  assert.strictEqual(r.suspect, false);
+  assert.strictEqual(r.comparable, false);
+});
+t('M16 przy zgodnym pokryciu prawdziwa usterka NADAL jest łapana', () => {
+  const r = RC({ charge: 325.2, discharge: 453.7, hours: 744 },
+               { charge: 347.8, discharge: 338.3, hours: 744 }, rcCfg);
+  assert.strictEqual(r.comparable, true);
+  assert.strictEqual(r.suspect, true, 'październik +34,1% musi zostać alarmem');
+  assert.ok(Math.abs(r.dischargeDeltaPct - 34.1) < 0.1, String(r.dischargeDeltaPct));
+});
 t('M9 próg konfigurowalny przez resolveConfig', () => {
   const strict = V.resolveConfig({ bmsTolerancePct: 1 });
   const r = RC({ charge: 100, discharge: 102, hours: 10 },

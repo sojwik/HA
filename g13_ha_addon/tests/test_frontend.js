@@ -488,6 +488,50 @@ t('N10 bateria stoi cały miesiąc: fantom Growatt nie wchodzi do rozliczenia', 
   assert.ok(Math.abs(p.monthly['2026-10'].growattRozladowanie - 64.8) < 1e-6, 'ślad Growatt zostaje');
 });
 
+console.log('\n=== F48: strażnik danych PV w szacunku ładowania z sieci ===');
+function seedGridMonth(mk, pvHours, totalHours, chargePerHour){
+  const t0 = Date.UTC(2026, 2, 17, 0);
+  sandbox.state.haHourly[mk] = [];
+  for (let i = 0; i < totalHours; i++){
+    sandbox.state.haHourly[mk].push({ts: t0 + i*3600000, produkcja: 0,
+      ladowanie: chargePerHour, rozladowanie: 0});
+  }
+  sandbox.state.months[mk] = {haPvHours: pvHours, haLadowanie: chargePerHour*totalHours,
+    haHours: totalHours};
+}
+t('N11 brak danych PV → szacunek NIEWIARYGODNY, nie pełny', () => {
+  // Realny marzec: 4 h z pomiarem produkcji na ~350 h ładowania z BMS.
+  seedGridMonth('2026-03', 4, 350, 0.44);
+  const g = sandbox.estimateGridCharge('2026-03');
+  assert.strictEqual(g.reliable, false, 'przy 4/350 h PV nie wolno ufać szacunkowi');
+  assert.ok(g.pvCoverage < 0.02, 'pokrycie ' + g.pvCoverage);
+  assert.strictEqual(g.pvHours, 4);
+});
+t('N12 pełne dane PV → szacunek bez zmian', () => {
+  seedGridMonth('2026-08', 744, 744, 0.1);
+  const g = sandbox.estimateGridCharge('2026-08');
+  assert.strictEqual(g.reliable, true);
+  assert.strictEqual(g.pvCoverage, 1);
+  assert.ok(Math.abs(g.kwh - 74.4) < 0.01, 'kwh ' + g.kwh);
+});
+t('N13 miesiąc bez ładowania nie potrzebuje danych PV', () => {
+  seedGridMonth('2026-06', 0, 720, 0);
+  const g = sandbox.estimateGridCharge('2026-06');
+  assert.strictEqual(g.reliable, true, 'nie ma czego szacować');
+  assert.strictEqual(g.kwh, 0);
+});
+t('N14 stan sprzed 0.3.1 (brak haPvHours) nie wywraca miesiąca', () => {
+  seedGridMonth('2026-05', 700, 744, 0.2);
+  delete sandbox.state.months['2026-05'].haPvHours;
+  const g = sandbox.estimateGridCharge('2026-05');
+  assert.strictEqual(g.pvCoverage, null);
+  assert.strictEqual(g.reliable, true, 'brak informacji to nie dowód usterki');
+});
+t('N15 eksport encji prosi o change i sum, nie tylko mean', () => {
+  assert.ok(HTML.includes("qs.set('types', 'mean,min,max,change,sum')"),
+    'liczniki energii potrzebują change — mean z licznika to nie energia');
+});
+
 console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
 module.exports = { pass, fail };
 if (require.main === module) process.exit(fail ? 1 : 0);
