@@ -115,6 +115,70 @@ function serveDir(dir) {
     w.G13Validate.expectedHoursInDay('2026-10-25') === 25);
 
   dom.window.close();
+  console.log('\n=== Cache RCE: stary format musi odpaść (regresja depozytu) ===');
+  // Naprawa parsera dtime nie wystarcza: stary cache ma KOMPLET 24 kluczy
+  // na dzień, więc allHoursCoveredForDate() uzna go za pełny i nie pobierze
+  // poprawnych cen. Sprawdzamy, że wersjonowanie cache to wychwytuje.
+  // Strona SAMA definiuje window.storage (shim na fetch do api/kv), więc
+  // podstawienie window.storage w beforeParse nie działa — zostanie nadpisane.
+  // Podmieniamy fetch, czyli warstwę, z której ten shim faktycznie korzysta.
+  async function loadWithCache(cacheValue) {
+    const kv = { 'rce-cache': cacheValue };
+    const dom2 = await JSDOM.fromURL(`http://127.0.0.1:${port}/index.html`, {
+      runScripts: 'dangerously',
+      resources: 'usable',
+      virtualConsole: vc,
+      beforeParse(window) {
+        window.XLSX = { read: () => ({ SheetNames: ['a'], Sheets: { a: {} } }), utils: { sheet_to_json: () => [] } };
+        window.fetch = (url, opts) => {
+          const u = String(url);
+          const m = u.match(/api\/kv\/(.+)$/);
+          if (m) {
+            const key = decodeURIComponent(m[1]);
+            const method = (opts && opts.method) || 'GET';
+            if (method === 'PUT') {
+              kv[key] = JSON.parse(opts.body).value;
+              return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ value: kv[key] }) });
+            }
+            if (method === 'DELETE') {
+              delete kv[key];
+              return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({}) });
+            }
+            if (kv[key] === undefined) return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ value: kv[key] }) });
+          }
+          return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}), text: () => Promise.resolve('') });
+        };
+      },
+    });
+    await new Promise(r => setTimeout(r, 1500));
+    dom2.__kv = kv;
+    return dom2;
+  }
+
+  // Stary format: surowa mapa, ceny przesunięte o godzinę.
+  const oldCache = {};
+  for (let h = 0; h < 24; h++) oldCache['2026-07-02_' + String(h).padStart(2, '0')] = 100 + h;
+  const dOld = await loadWithCache(JSON.stringify(oldCache));
+  // Uwaga: body.textContent zawiera też kod źródłowy skryptu, więc szukanie
+  // frazy w całym body daje fałszywy pozytyw. Czytamy tylko panel logu.
+  const bodyOld = dOld.window.document.getElementById('logOutput').textContent;
+  t('D14 stary cache RCE odrzucony z ostrzeżeniem',
+    bodyOld.includes('starym formacie'),
+    'oczekiwano komunikatu o starym formacie cache');
+  t('D15 stary cache nie zostaje zapisany z powrotem jako aktualny',
+    dOld.__kv['rce-cache'] === undefined
+      || JSON.parse(dOld.__kv['rce-cache']).v === 2);
+  dOld.window.close();
+
+  // Nowy format: wersjonowany, musi zostać wczytany bez ostrzeżenia.
+  const dNew = await loadWithCache(JSON.stringify({ v: 2, data: oldCache }));
+  const bodyNew = dNew.window.document.getElementById('logOutput').textContent;
+  t('D16 nowy cache RCE przyjęty bez ostrzeżenia',
+    !bodyNew.includes('starym formacie'),
+    'wersjonowany cache nie powinien być odrzucany');
+  dNew.window.close();
+
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
   if (errors.length) console.log('\nZebrane błędy (pierwsze 5):\n' + errors.slice(0, 5).join('\n'));

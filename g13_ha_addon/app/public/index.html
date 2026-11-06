@@ -591,6 +591,10 @@ window.storage = {
 const V = window.G13Validate;
 let validateCfg = V.resolveConfig();
 let haSyncInFlight = false;   // S3: nakładające się synchronizacje dublowały dane
+// Podnieś przy KAŻDEJ zmianie sposobu ustalania godziny lub wyceny RCE,
+// żeby stary cache nie utrzymał błędnych cen. v2 = godzina ze STARTU okresu.
+const RCE_CACHE_VERSION = 2;
+
 const state = {
   hourlyElicznik: {},  // 'YYYY-MM-DD_HH' -> {date,hour,oddaniePoZbil,poborPoZbil}
   rceHourly: {},        // 'YYYY-MM-DD_HH' -> averaged PLN/MWh
@@ -2118,7 +2122,7 @@ async function saveState(){
   if (!storageUsable()) return;
   try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates})); }
   catch(e){ log('Nie udało się zapisać rejestru miesięcy: ' + e.message, 'error'); }
-  try{ await window.storage.set('rce-cache', JSON.stringify(state.rceHourly)); }
+  try{ await window.storage.set('rce-cache', JSON.stringify({v: RCE_CACHE_VERSION, data: state.rceHourly})); }
   catch(e){ log('Nie udało się zapisać cache cen RCE: ' + e.message, 'error'); }
 }
 async function loadState(){
@@ -2144,7 +2148,24 @@ async function loadState(){
     } catch(e){ /* brak zapisanych danych — pierwsze uruchomienie */ }
     try{
       const r = await window.storage.get('rce-cache');
-      if (r && r.value) state.rceHourly = JSON.parse(r.value);
+      if (r && r.value){
+        const parsedRce = JSON.parse(r.value);
+        if (parsedRce && parsedRce.v === RCE_CACHE_VERSION && parsedRce.data){
+          state.rceHourly = parsedRce.data;
+        } else {
+          // Stary format: surowa mapa godzin zbudowana z `dtime`, czyli z KOŃCA
+          // interwału — ceny przesunięte o jedną godzinę. Cache ma komplet
+          // 24 kluczy na dzień, więc allHoursCoveredForDate() uznałby go za
+          // pełny i nigdy nie pobrał poprawnych cen. Odrzucamy go jawnie.
+          state.rceHourly = {};
+          // Usuwamy od razu, żeby ostrzeżenie nie wracało przy każdym starcie.
+          // Nie ruszamy monthly-ledger — koszty i rejestr miesięcy zostają.
+          try{ await window.storage.delete('rce-cache'); } catch(err){}
+          log('Cache cen RCE był w starym formacie (godzina brana z końca interwału, '
+            + 'ceny przesunięte o 1 h). Usunięto go — pobierz ceny RCE ponownie, '
+            + 'żeby depozyt był liczony poprawnie. Rejestr miesięcy i koszty zostają nietknięte.', 'warn');
+        }
+      }
     } catch(e){ /* brak cache — pierwsze uruchomienie */ }
   }
   const kiInput = document.getElementById('inputKosztInwestycji');
