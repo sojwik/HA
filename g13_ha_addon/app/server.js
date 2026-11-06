@@ -23,7 +23,8 @@ const { statisticsToCsv, anyStatsToCsv } = require('./lib/growatt-csv');
 const V = require('./lib/validate');
 
 const PORT = process.env.PORT || 8099;
-const OPTIONS_FILE = '/data/options.json';
+// Ścieżka podstawialna w testach. W kontenerze zawsze /data/options.json.
+const OPTIONS_FILE = process.env.OPTIONS_FILE || '/data/options.json';
 const AUTH_TOKEN = process.env.ADDON_TOKEN || '';
 
 const DEFAULT_OPTIONS = {
@@ -35,6 +36,11 @@ const DEFAULT_OPTIONS = {
     'sensor.growatt_battery_battery_charge_total',
     'sensor.growatt_battery_battery_discharge_total',
   ],
+  // Niezależny pomiar DC z BMS (audyt cz. 12). Puste = wyłączone.
+  // Muszą to być LICZNIKI energii w kWh ze state_class total_increasing,
+  // nie czujniki chwilowej mocy — te nie mają `change` i wrócą puste.
+  bms_charge_entity: '',
+  bms_discharge_entity: '',
   history_months_back: 24,
   refresh_interval_minutes: 60,
   // Progi fizyczne — pod WIT 12K-HU i moc umowną 16 kW. Nadpisywalne w opcjach.
@@ -44,6 +50,7 @@ const DEFAULT_OPTIONS = {
   },
   battery_capacity_kwh: 14.34,   // 16S 280 Ah @ 3,2 V nominalnie; musi zgadzać się z validate.js
   battery_eta: 0.92,
+  battery_eta_dc: 0.94,   // BMS mierzy przed falownikiem — patrz validate.js
   require_auth: false,
 };
 
@@ -64,7 +71,35 @@ const validateCfg = V.resolveConfig({
   limitsKw: options.limits_kw,
   batteryCapacityKwh: options.battery_capacity_kwh,
   batteryEta: options.battery_eta,
+  batteryEtaDc: options.battery_eta_dc,
 });
+
+/* Encje BMS po walidacji. Odrzucamy śmieci i kolizje z listą Growatt —
+ * gdyby ta sama encja była w obu listach, frontend sklasyfikowałby ją jako
+ * Growatt i BMS nigdy by nie zadziałał, bez żadnego komunikatu. */
+function bmsEntities() {
+  const out = { charge: '', discharge: '' };
+  const pairs = [['charge', options.bms_charge_entity], ['discharge', options.bms_discharge_entity]];
+  pairs.forEach(function (pair) {
+    const key = pair[0], raw = pair[1];
+    if (typeof raw !== 'string' || !raw.trim()) return;
+    const id = raw.trim();
+    if (!/^[a-z_]+\.[a-z0-9_]+$/.test(id)) {
+      console.warn('[bms] Pomijam nieprawidłowe entity_id: ' + JSON.stringify(id));
+      return;
+    }
+    if (options.growatt_entities.indexOf(id) !== -1) {
+      console.warn('[bms] Pomijam ' + id + ' — ta encja jest już w growatt_entities.');
+      return;
+    }
+    out[key] = id;
+  });
+  if (out.charge && out.charge === out.discharge) {
+    console.warn('[bms] Ładowanie i rozładowanie wskazują tę samą encję — pomijam rozładowanie.');
+    out.discharge = '';
+  }
+  return out;
+}
 
 function monthsAgo(n) {
   const d = new Date();
@@ -176,9 +211,13 @@ app.get('/api/config', (req, res) => {
     historyMonthsBack: options.history_months_back,
     refreshIntervalMinutes: options.refresh_interval_minutes,
     growattEntities: options.growatt_entities,
+    bmsChargeEntity: bmsEntities().charge,
+    bmsDischargeEntity: bmsEntities().discharge,
+    bmsTolerancePct: validateCfg.bmsTolerancePct,
     limitsKw: options.limits_kw,
     batteryCapacityKwh: options.battery_capacity_kwh,
     batteryEta: options.battery_eta,
+    batteryEtaDc: options.battery_eta_dc,
   });
 });
 
@@ -207,6 +246,33 @@ app.get('/api/growatt/ha-stats.csv', async (req, res) => {
     console.log(`[growatt] okresów na encję: ${counts.map(([id, n]) => id.replace('sensor.growatt_', '') + '=' + n).join(', ')}`);
     if (empty.length) {
       console.warn(`[growatt] UWAGA: brak danych dla: ${empty.join(', ')} — sprawdź entity_id w opcjach dodatku vs. Developer Tools → States.`);
+    }
+
+    // BMS doklejamy do TEJ SAMEJ odpowiedzi, żeby był jeden CSV, jeden parser
+    // i jedna ścieżka walidacji. Osobny request mógłby się rozjechać w czasie
+    // z Growatt i porównywałby różne okna.
+    //
+    // Błąd BMS NIE może zabić danych Growatt — bez tego brak encji BMS
+    // (np. ESP padł) wyłączałby całą synchronizację.
+    const bms = bmsEntities();
+    const bmsIds = [bms.charge, bms.discharge].filter(Boolean);
+    if (bmsIds.length) {
+      try {
+        const bmsResult = await haWs.fetchStatistics(bmsIds, start, end);
+        Object.assign(result, bmsResult);
+        const bmsCounts = bmsIds.map((id) => [id, (bmsResult[id] || []).length]);
+        console.log('[bms] okresów na encję: ' + bmsCounts.map(([id, n]) => id + '=' + n).join(', '));
+        const bmsEmpty = bmsCounts.filter(([, n]) => n === 0).map(([id]) => id);
+        if (bmsEmpty.length) {
+          console.warn('[bms] UWAGA: brak statystyk dla: ' + bmsEmpty.join(', ')
+            + ' — encja musi być licznikiem kWh ze state_class total_increasing. '
+            + 'Czujnik chwilowej mocy (W) nie ma `change` i zawsze wróci pusty. '
+            + 'Kanały baterii zostają przy Growatt.');
+        }
+      } catch (err) {
+        console.warn('[bms] Nie pobrałem statystyk BMS: ' + err.message
+          + ' — kanały baterii zostają przy Growatt.');
+      }
     }
 
     res.set('Content-Type', 'text/csv; charset=utf-8');
@@ -343,6 +409,12 @@ const server = app.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Encje Growatt (${options.growatt_entities.length}): ${options.growatt_entities.join(', ')}`);
   console.log(`[server] Progi kW: ${JSON.stringify(options.limits_kw)}`);
   console.log(`[server] Bateria: ${options.battery_capacity_kwh} kWh, η=${options.battery_eta}`);
+  const bmsAtStart = bmsEntities();
+  if (bmsAtStart.charge || bmsAtStart.discharge) {
+    console.log(`[server] BMS (DC, źródło nadrzędne baterii): ład=${bmsAtStart.charge || '—'}, rozład=${bmsAtStart.discharge || '—'}`);
+  } else {
+    console.log('[server] BMS: nie skonfigurowany — kanały baterii liczone z Growatt.');
+  }
   if (options.require_auth && AUTH_TOKEN) console.log('[server] Autoryzacja: WŁĄCZONA (X-Addon-Token)');
   else console.warn('[server] Autoryzacja: wyłączona — dodatek dostępny dla każdego w sieci. Ustaw require_auth + ADDON_TOKEN jeśli port jest wystawiony.');
   const h = kv.health();

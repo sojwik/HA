@@ -1,5 +1,5 @@
 name: "G13 Depozyt Prosumencki"
-version: "0.2.9"
+version: "0.3.0"
 slug: "g13_depozyt_calc"
 description: "Kalkulator depozytu prosumenckiego TAURON G13 z automatycznym pobieraniem danych Growatt z Home Assistant i walidacją fizyczną pomiarów."
 arch:
@@ -26,6 +26,15 @@ options:
     - "sensor.growatt_load_load_energy_total"
     - "sensor.growatt_battery_battery_charge_total"
     - "sensor.growatt_battery_battery_discharge_total"
+  # Niezależny pomiar DC z BMS. Gdy ustawione, kanały baterii są liczone
+  # z BMS zamiast z Growatt, a rozbieżność pokazywana w panelu.
+  # WYMAGANE: liczniki energii w kWh ze state_class: total_increasing.
+  # Czujniki chwilowej mocy (W) NIE zadziałają — nie mają `change`.
+  # Przykład z JK-BMS przez ESPHome:
+  #   bms_charge_entity: "sensor.woda_lfp_charging_total"
+  #   bms_discharge_entity: "sensor.woda_lfp_discharging_total"
+  bms_charge_entity: ""
+  bms_discharge_entity: ""
   history_months_back: 24
   refresh_interval_minutes: 60
   # Progi fizyczne w kW. Wartości domyślne pod Growatt WIT 12K-HU
@@ -45,12 +54,19 @@ options:
   # 3,65 V/ogniwo → 16,35 kWh (szczyt) — użyta jako górna granica w teście SOC
   battery_capacity_kwh: 14.34
   battery_eta: 0.92
+  # Sprawność po stronie DC — używana, gdy kanały baterii liczone są z BMS.
+  # Zmierzone na 46 zdrowych dobach: DC 0,9335 vs AC 0,9151 (różnica to
+  # strata falownika). Nie ustawiaj tu tej samej wartości co battery_eta,
+  # bo poprawne miesiące z BMS będą oznaczane jako niemożliwe.
+  battery_eta_dc: 0.94
   # Włącz, jeśli port 8099 jest wystawiony poza ingress.
   # Wymaga ustawienia zmiennej środowiskowej ADDON_TOKEN.
   require_auth: false
 schema:
   growatt_entities:
     - "str"
+  bms_charge_entity: "str?"
+  bms_discharge_entity: "str?"
   history_months_back: "int(1,120)"
   refresh_interval_minutes: "int(5,1440)"
   limits_kw:
@@ -62,4 +78,5 @@ schema:
     rozladowanie: "float(0.1,100)"
   battery_capacity_kwh: "float(0.1,500)"
   battery_eta: "float(0.5,1)"
+  battery_eta_dc: "float(0.5,1)"
   require_auth: "bool"

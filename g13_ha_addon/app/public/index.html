@@ -475,6 +475,33 @@
       </table>
     </div>
     <div id="realBatteryNote"></div>
+    <div id="bmsCompareBlock" style="margin-top:1.1rem;">
+      <h3 style="margin:0 0 .35rem;">Kontrola krzyżowa: BMS (DC) vs Growatt (AC)</h3>
+      <p class="hint" style="margin:0 0 .6rem;">BMS mierzy prąd i napięcie na zaciskach paczki, więc nie zależy
+        od mapy rejestrów falownika ani od wersji integracji Growatt. Po ustawieniu
+        <code>bms_charge_entity</code> i <code>bms_discharge_entity</code> w opcjach dodatku kanały baterii
+        są liczone z BMS, a rozbieżność wobec Growatt zostaje pokazana tutaj.
+        Różnica rzędu 1–3% jest normalna (strata falownika DC→AC); powyżej 10% oznacza usterkę odczytu.</p>
+      <div class="status" id="bmsCompareStatus"></div>
+      <div class="table-scroll">
+        <table>
+          <thead>
+            <tr>
+              <th>Miesiąc</th>
+              <th class="num" title="Ładowanie wg Growatt">Ład. Growatt</th>
+              <th class="num" title="Ładowanie wg BMS">Ład. BMS</th>
+              <th class="num" title="Odchylenie Growatt względem BMS">Δ ład.</th>
+              <th class="num" title="Rozładowanie wg Growatt">Rozład. Growatt</th>
+              <th class="num" title="Rozładowanie wg BMS">Rozład. BMS</th>
+              <th class="num" title="Odchylenie Growatt względem BMS">Δ rozład.</th>
+              <th>Źródło w rozliczeniu</th>
+            </tr>
+          </thead>
+          <tbody id="bmsCompareBody"></tbody>
+        </table>
+      </div>
+      <div id="bmsCompareNote"></div>
+    </div>
     <p class="hint" style="margin-top:.6rem;">Zysk netto = rozładowanie × stawka − energia kupiona z sieci × stawka. Samo rozładowanie nie jest oszczędnością, jeśli bateria była ładowana z sieci. Kolumna „Z sieci” to szacunek (ładowanie przy zerowej produkcji AC) — nie widzi ładowania z sieci przy jednoczesnej produkcji PV, więc rzeczywisty koszt może być wyższy. Miesiące z niemożliwym bilansem magazynu są oznaczone na czerwono.</p>
   </section>
 
@@ -637,7 +664,8 @@ const state = {
   zoneRates: {},          // stawki PLN/kWh per strefa (T1/T2/T3...), nazwy dynamiczne z danych
   haRejected: {},         // 'YYYY-MM' -> podsumowanie odrzuconych godzin (widoczne w UI)
   haBatteryCheck: {},     // 'YYYY-MM' -> wynik testu rozstępu SOC
-  haHourly: {}            // 'YYYY-MM' -> [{ts,ladowanie,rozladowanie}] do walidacji miesięcznej
+  haHourly: {},           // 'YYYY-MM' -> [{ts,ladowanie,rozladowanie}] do walidacji miesięcznej
+  bmsCheck: {}            // 'YYYY-MM' -> wynik reconcileBatteryMonth (BMS vs Growatt)
 };
 let rceBuffer = {};
 let apiSampleLogged = false;
@@ -1213,11 +1241,24 @@ function render(){
   renderWygasanie();
   renderStrefy();
   renderRealBattery();
+  renderBmsCompare();
   renderHaDiagnostics();
 }
 
 /* ============================== GROWATT PRZEZ HOME ASSISTANT (prawdziwe zużycie domu + bateria) ============================== */
-function classifyGrowattHaSensor(id){
+/* F41: mapa encji BMS z /api/config. `var`, nie `let` — klasyfikator bywa
+ * wołany zanim konfiguracja dojedzie, a `let` w TDZ rzuciłby ReferenceError
+ * i wywalił cały parser. Pusta mapa = BMS wyłączony, zachowanie jak dotąd. */
+var bmsEntityMap = {};
+
+function applyBmsEntityMap(cfg){
+  bmsEntityMap = {};
+  if (!cfg) return;
+  if (typeof cfg.bmsChargeEntity === 'string' && cfg.bmsChargeEntity) bmsEntityMap[cfg.bmsChargeEntity] = 'bmsLadowanie';
+  if (typeof cfg.bmsDischargeEntity === 'string' && cfg.bmsDischargeEntity) bmsEntityMap[cfg.bmsDischargeEntity] = 'bmsRozladowanie';
+}
+
+function classifyGrowattHaSensor(id, bmsMap){
   const map = {
     'sensor.growatt_solar_energy_total': 'produkcja',
     'sensor.growatt_grid_energy_to_grid_total': 'oddanieHa',
@@ -1226,7 +1267,12 @@ function classifyGrowattHaSensor(id){
     'sensor.growatt_battery_battery_charge_total': 'ladowanie',
     'sensor.growatt_battery_battery_discharge_total': 'rozladowanie'
   };
-  return map[id] || null;
+  if (map[id]) return map[id];
+  // Role BMS są OSOBNE, nie nadpisują ról Growatt — oba źródła muszą przejść
+  // przez parser, żeby dało się je porównać. Gdyby BMS dostał rolę
+  // 'ladowanie', obie wartości zsumowałyby się w jedną i ślad usterki zniknął.
+  const bm = bmsMap || (typeof bmsEntityMap !== 'undefined' ? bmsEntityMap : null);
+  return (bm && bm[id]) || null;
 }
 
 /* Parser eksportu HA z walidacją fizyczną.
@@ -1322,26 +1368,39 @@ function parseHaStatisticsCsv(rows, sourceLabel){
   const monthly = {};
   const hourlyByMonth = {};
   const roleToHourField = {produkcja:'produkcja', oddanieHa:'oddanieHa', poborHa:'poborHa',
-                           zuzycieDomu:'zuzycieDomu', ladowanie:'ladowanie', rozladowanie:'rozladowanie'};
+                           zuzycieDomu:'zuzycieDomu', ladowanie:'ladowanie', rozladowanie:'rozladowanie',
+                           bmsLadowanie:'bmsLadowanie', bmsRozladowanie:'bmsRozladowanie'};
+  // F42: pokrycie liczone z TIMESTAMPÓW, nie z wartości. Godzina z zerowym
+  // ładowaniem to nadal pomiar — a zero jest częste i legalne (bateria pełna).
+  // Liczenie „godzin z wartością > 0” zaniżałoby pokrycie BMS w nocy.
+  const covByMonth = {};
   let accepted = 0;
 
   for (const role in perRole){
     const list = perRole[role];
     for (let i = 0; i < list.length; i++){
       const prevTs = i > 0 ? list[i-1].ts : null;
-      const verdict = V.acceptDelta(role, list[i].delta, prevTs, list[i].ts, validateCfg);
+      // BMS mierzy tę samą wielkość fizyczną co Growatt, więc obowiązuje go
+      // ten sam próg mocy. Bez mapowania acceptDelta zwróciłby unknownRole
+      // i przepuścił dowolnie absurdalne delty BMS bez ostrzeżenia.
+      const limitRole = role === 'bmsLadowanie' ? 'ladowanie'
+        : role === 'bmsRozladowanie' ? 'rozladowanie' : role;
+      const verdict = V.acceptDelta(limitRole, list[i].delta, prevTs, list[i].ts, validateCfg);
       const mk = V.monthKeyFromUtc(list[i].ts);
       if (!verdict.ok){
         rej.add(role, list[i].ts, list[i].delta, verdict);
         continue;
       }
       accepted++;
-      if (!monthly[mk]) monthly[mk] = {produkcja:0, oddanieHa:0, poborHa:0, zuzycieDomu:0, ladowanie:0, rozladowanie:0};
+      if (!monthly[mk]) monthly[mk] = {produkcja:0, oddanieHa:0, poborHa:0, zuzycieDomu:0, ladowanie:0, rozladowanie:0, bmsLadowanie:0, bmsRozladowanie:0};
       monthly[mk][role] += list[i].delta;
+      const cov = (covByMonth[mk] = covByMonth[mk] || {g:new Set(), b:new Set()});
+      if (role === 'ladowanie' || role === 'rozladowanie') cov.g.add(list[i].ts);
+      if (role === 'bmsLadowanie' || role === 'bmsRozladowanie') cov.b.add(list[i].ts);
       if (roleToHourField[role]){
         if (!hourlyByMonth[mk]) hourlyByMonth[mk] = {};
         const h = (hourlyByMonth[mk][list[i].ts] = hourlyByMonth[mk][list[i].ts]
-          || {ts:list[i].ts, produkcja:0, oddanieHa:0, poborHa:0, zuzycieDomu:0, ladowanie:0, rozladowanie:0});
+          || {ts:list[i].ts, produkcja:0, oddanieHa:0, poborHa:0, zuzycieDomu:0, ladowanie:0, rozladowanie:0, bmsLadowanie:0, bmsRozladowanie:0});
         h[roleToHourField[role]] += list[i].delta;
       }
     }
@@ -1370,7 +1429,56 @@ function parseHaStatisticsCsv(rows, sourceLabel){
   for (const mk in hourlyByMonth){
     hourly[mk] = Object.values(hourlyByMonth[mk]).sort(function(a,b){ return a.ts-b.ts; });
   }
-  return {monthly:monthly, hourly:hourly, rejected:summary};
+  // 6) F43: uzgodnienie źródeł baterii. BMS (DC) jest nadrzędny, ale tylko
+  //    gdy pokrywa miesiąc — inaczej podmiana zaniżyłaby sumę.
+  //
+  //    Podmiana musi objąć TAKŻE godziny, nie tylko sumę miesiąca: z godzin
+  //    liczy się test rozstępu SOC (validateBatteryMonth) i szacunek ładowania
+  //    z sieci (estimateGridCharge). Podmiana samych sum dałaby miesiąc
+  //    „naprawiony” w tabeli, a nadal niemożliwy w teście.
+  const bmsReport = {};
+  for (const mk in monthly){
+    const m = monthly[mk];
+    const cov = covByMonth[mk] || {g:new Set(), b:new Set()};
+    const dec = V.reconcileBatteryMonth(
+      {charge:m.ladowanie, discharge:m.rozladowanie, hours:cov.g.size},
+      {charge:m.bmsLadowanie, discharge:m.bmsRozladowanie, hours:cov.b.size},
+      validateCfg);
+    m.growattLadowanie = round2(m.ladowanie);
+    m.growattRozladowanie = round2(m.rozladowanie);
+    if (dec.source === 'bms'){
+      // Hybryda świadoma: godzina z BMS bierze wartość BMS, godzina bez BMS
+      // zostaje przy Growatt. Wyzerowanie jej zaniżyłoby miesiąc, a suma
+      // miesiąca przestałaby się zgadzać z sumą godzin.
+      let ch = 0, dis = 0, fromBms = 0, fromGw = 0;
+      (hourly[mk] || []).forEach(function(h){
+        if (cov.b.has(h.ts)){
+          h.ladowanie = h.bmsLadowanie;
+          h.rozladowanie = h.bmsRozladowanie;
+          fromBms++;
+        } else {
+          fromGw++;
+        }
+        ch += h.ladowanie; dis += h.rozladowanie;
+      });
+      m.ladowanie = ch; m.rozladowanie = dis;
+      dec.charge = round2(ch);
+      dec.discharge = round2(dis);
+      dec.hoursFromBms = fromBms;
+      dec.hoursFromGrowatt = fromGw;
+      if (fromGw > 0){
+        log('Bateria ' + formatMonthLabel(mk) + ': ' + fromBms + ' h z BMS, '
+            + fromGw + ' h uzupełnione z Growatt (BMS nie miał tych godzin).', 'warn');
+      }
+    }
+    bmsReport[mk] = dec;
+    if (dec.suspect){
+      log('Kontrola krzyżowa ' + formatMonthLabel(mk) + ': ' + dec.reason, 'error');
+    } else if (dec.partial){
+      log('Kontrola krzyżowa ' + formatMonthLabel(mk) + ': ' + dec.reason, 'warn');
+    }
+  }
+  return {monthly:monthly, hourly:hourly, rejected:summary, bms:bmsReport};
 }
 
 /* Szacunek energii kupionej z sieci do naładowania baterii.
@@ -1468,7 +1576,14 @@ function renderHaDiagnostics(){
 function runBatteryValidation(){
   state.haBatteryCheck = {};
   for (const mk in state.haHourly){
-    const res = V.validateBatteryMonth(state.haHourly[mk], validateCfg);
+    // BMS mierzy DC, więc obowiązuje go sprawność DC. Progiem AC (0,92)
+    // poprawny miesiąc z BMS byłby odrzucony jako niemożliwy.
+    const bmsCheck = state.bmsCheck || {};
+    const fromBms = bmsCheck[mk] && bmsCheck[mk].source === 'bms';
+    const cfgM = fromBms
+      ? Object.assign({}, validateCfg, {batteryEta: validateCfg.batteryEtaDc})
+      : validateCfg;
+    const res = V.validateBatteryMonth(state.haHourly[mk], cfgM);
     state.haBatteryCheck[mk] = res;
     if (!res.plausible){
       log('Bateria ' + formatMonthLabel(mk) + ': ' + res.reason
@@ -1507,6 +1622,7 @@ async function handleHaStatsFiles(fileList){
         // F31: było `= parsed.rejected` — jeden globalny summary dla każdego
         // miesiąca. Nagłówek sumował to 9 razy (192 h -> 1728 h).
         state.haRejected[mk] = rejByMonth[mk] || {total:0, rejectedKwh:0, byRole:{}};
+        if (parsed.bms && parsed.bms[mk]) state.bmsCheck[mk] = parsed.bms[mk];
         if (parsed.hourly[mk]){
           state.haHourly[mk] = parsed.hourly[mk];
           // F32: pokrycie godzinowe, żeby nie traktować niepełnego miesiąca
@@ -1897,6 +2013,74 @@ function simulateBattery(capacityKwh, efficiency){
   return monthly;
 }
 
+/* F45: tabela kontrola krzyżowa. Świadomie pokazuje OBA źródła i odchylenie,
+ * a nie tylko wybrane — ukrycie rozbieżności byłoby powtórzeniem tego, co
+ * zrobił Growatt: wyglądałoby poprawnie, dopóki ktoś nie policzy niezależnie. */
+function renderBmsCompare(){
+  const tbody = document.getElementById('bmsCompareBody');
+  if (!tbody) return;
+  const statusEl = document.getElementById('bmsCompareStatus');
+  const noteEl = document.getElementById('bmsCompareNote');
+  const check = state.bmsCheck || {};
+  const keys = Object.keys(check).filter(function(k){ return check[k] && check[k].bmsAvailable; }).sort();
+
+  if (!keys.length){
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Brak danych BMS — ustaw bms_charge_entity i bms_discharge_entity w opcjach dodatku (liczniki kWh, state_class: total_increasing).</td></tr>';
+    if (statusEl) statusEl.textContent = '';
+    if (noteEl) noteEl.innerHTML = '';
+    return;
+  }
+
+  const pct = function(v){
+    if (v === null || v === undefined) return '—';
+    // Przecinek dziesiętny, tak jak formatKwh1/formatPLN w pozostałych tabelach.
+    return (v > 0 ? '+' : '') + v.toLocaleString('pl-PL', {minimumFractionDigits:1, maximumFractionDigits:1}) + '%';
+  };
+  const cls = function(v){
+    if (v === null || v === undefined) return 'num';
+    return 'num' + (Math.abs(v) > 10 ? ' accent-rust' : (Math.abs(v) > 3 ? ' accent-amber' : ''));
+  };
+  let html = '', suspectMonths = 0, partialMonths = 0, gwHoursTotal = 0;
+  keys.forEach(function(mk){
+    const d = check[mk];
+    if (d.suspect) suspectMonths++;
+    if (d.partial) partialMonths++;
+    gwHoursTotal += (d.hoursFromGrowatt || 0);
+    const src = d.source === 'bms'
+      ? '<span class="tag-manual">BMS</span>'
+      : '<span class="tag-warn" title="' + V.escapeHtml(d.reason || '') + '">Growatt</span>';
+    html += '<tr>' +
+      '<td class="col-month">' + formatMonthLabel(mk) + '</td>' +
+      '<td class="num">' + formatKwh1(d.growattCharge) + '</td>' +
+      '<td class="num">' + formatKwh1(d.bmsCharge) + '</td>' +
+      '<td class="' + cls(d.chargeDeltaPct) + '">' + pct(d.chargeDeltaPct) + '</td>' +
+      '<td class="num">' + formatKwh1(d.growattDischarge) + '</td>' +
+      '<td class="num">' + formatKwh1(d.bmsDischarge) + '</td>' +
+      '<td class="' + cls(d.dischargeDeltaPct) + '">' + pct(d.dischargeDeltaPct) + '</td>' +
+      '<td>' + src + '</td>' +
+      '</tr>';
+  });
+  tbody.innerHTML = html;
+
+  if (statusEl){
+    statusEl.textContent = suspectMonths
+      ? ('UWAGA: ' + suspectMonths + ' mies. z rozbieżnością powyżej progu — liczniki Growatt są tam błędne. Rozliczenie używa BMS.')
+      : ('Kontrola krzyżowa przeszła dla ' + keys.length + ' mies. — źródła zgodne w tolerancji.');
+    statusEl.style.color = suspectMonths ? 'var(--rust)' : '';
+  }
+  if (noteEl){
+    const notes = [];
+    keys.forEach(function(mk){
+      const d = check[mk];
+      if (d.reason) notes.push('<p class="hint" style="margin:.3rem 0;"><strong>' + formatMonthLabel(mk) + ':</strong> ' + V.escapeHtml(d.reason) + '</p>');
+    });
+    if (gwHoursTotal > 0){
+      notes.push('<p class="hint" style="margin:.3rem 0;">' + gwHoursTotal + ' godzin wzięto z Growatt, bo BMS ich nie miał. Reszta z BMS.</p>');
+    }
+    noteEl.innerHTML = notes.join('');
+  }
+}
+
 function renderRealBattery(){
   const tbody = document.getElementById('realBatteryBody');
   if (!tbody) return;
@@ -1973,7 +2157,10 @@ function renderRealBattery(){
     // Test miesięczny tego nie łapie, bo każdy miesiąc osobno może wyglądać
     // dobrze, a nadmiar narasta dopiero w całym okresie.
     const total = V.validateBatteryTotal(keys.map(function(k){
-      return { ladowanie: state.months[k].haLadowanie, rozladowanie: state.months[k].haRozladowanie };
+      // Suma miesza źródła, więc każdy miesiąc niesie własną sprawność.
+      const fromBms = (state.bmsCheck || {})[k] && state.bmsCheck[k].source === 'bms';
+      return { ladowanie: state.months[k].haLadowanie, rozladowanie: state.months[k].haRozladowanie,
+               eta: fromBms ? validateCfg.batteryEtaDc : validateCfg.batteryEta };
     }), validateCfg);
     if (total.impossible){
       parts.push('<p class="hint" style="margin:.5rem 0;padding:.5rem .7rem;'
@@ -2301,7 +2488,7 @@ async function saveState(){
   try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates,
     // F36: bez tego po restarcie znikały oznaczenia „bilans niemożliwy”
     // i tabela odrzuconych godzin, a zawyżone liczby zostawały.
-    haBatteryCheck: state.haBatteryCheck, haRejected: state.haRejected})); }
+    haBatteryCheck: state.haBatteryCheck, haRejected: state.haRejected, bmsCheck: state.bmsCheck})); }
   catch(e){ log('Nie udało się zapisać rejestru miesięcy: ' + e.message, 'error'); }
   try{ await window.storage.set('rce-cache', JSON.stringify({v: RCE_CACHE_VERSION, data: state.rceHourly})); }
   catch(e){ log('Nie udało się zapisać cache cen RCE: ' + e.message, 'error'); }
@@ -2317,6 +2504,7 @@ async function loadState(){
       limitsKw: ac.limitsKw,
       batteryCapacityKwh: ac.batteryCapacityKwh,
       batteryEta: ac.batteryEta,
+      batteryEtaDc: ac.batteryEtaDc,
     });
   } catch(e){ /* brak backendu (plik otwarty lokalnie) — zostaje default */ }
   if (storageUsable()){
@@ -2338,6 +2526,7 @@ async function loadState(){
           // „czyścił” ostrzeżenia, choć dane nadal były uszkodzone.
           state.haBatteryCheck = parsed.haBatteryCheck || {};
           state.haRejected = parsed.haRejected || {};
+          state.bmsCheck = parsed.bmsCheck || {};
         } else if (parsed && typeof parsed === 'object'){
           state.months = parsed; // format sprzed dodania panelu Analiza — same miesiące bez opakowania
         }
@@ -2518,6 +2707,7 @@ async function loadAddonConfig(){
     if (r.ok) addonConfig = await r.json();
   } catch(e){ /* zostanie użyty fallback poniżej */ }
   if (!addonConfig) addonConfig = { historyMonthsBack: 24, refreshIntervalMinutes: 60 };
+  applyBmsEntityMap(addonConfig);
   return addonConfig;
 }
 
