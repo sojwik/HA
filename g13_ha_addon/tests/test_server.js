@@ -200,6 +200,112 @@ function waitForServer(timeoutMs) {
       'host: ' + host + '\nconnect-src: ' + connectSrc);
   }
 
+
+  console.log('\n=== BMS: konfiguracja i scalanie źródeł (S43–S52) ===');
+  r = await req('GET', '/api/config');
+  t('S43 /api/config wystawia pola BMS',
+    r.json && 'bmsChargeEntity' in r.json && 'bmsDischargeEntity' in r.json, JSON.stringify(r.json));
+  t('S44 domyślnie BMS wyłączony (puste, nie undefined)',
+    r.json.bmsChargeEntity === '' && r.json.bmsDischargeEntity === '', JSON.stringify(r.json));
+  t('S45 /api/config wystawia próg tolerancji', r.json.bmsTolerancePct === 10, String(r.json.bmsTolerancePct));
+  t('S53 /api/config wystawia sprawność DC osobno od AC',
+    r.json.batteryEtaDc === 0.94 && r.json.batteryEta === 0.92,
+    'DC=' + r.json.batteryEtaDc + ' AC=' + r.json.batteryEta);
+
+  // Drugi i trzeci proces: PRAWDZIWY server.js, tylko ha-ws podstawiony, żeby
+  // nie potrzebować Home Assistant. Testujemy scalanie, walidację opcji i
+  // odporność na awarię BMS — nie sam transport WS (ten mają testy H3–H6).
+  const APP_DIR = path.join(__dirname, '../app');
+  const HA_WS_PATH = path.join(APP_DIR, 'lib/ha-ws.js');
+  const stubPath = path.join(TMP, 'stub-ha-ws.js');
+  const failFlag = path.join(TMP, 'bms-fail');
+  fs.writeFileSync(stubPath, [
+    "'use strict';",
+    'const fs = require("fs");',
+    'const HA = ' + JSON.stringify(HA_WS_PATH) + ';',
+    'const FLAG = ' + JSON.stringify(failFlag) + ';',
+    'const real = require(HA);',
+    'const fake = {',
+    '  asValidDate: real.asValidDate,',
+    '  ALLOWED_STAT_TYPES: real.ALLOWED_STAT_TYPES,',
+    '  fetchStatistics(ids, start){',
+    '    if (fs.existsSync(FLAG) && ids.some(id => id.indexOf("sensor.bms_") === 0)) {',
+    '      return Promise.reject(new Error("BMS niedostepny (test)"));',
+    '    }',
+    '    const out = {}; const t0 = new Date(start).getTime();',
+    '    ids.forEach(id => { out[id] = [0,1,2].map(i => ({ start: t0 + i*3600000, sum: 10+i, change: 1 })); });',
+    '    return Promise.resolve(out);',
+    '  },',
+    '};',
+    'require.cache[HA] = { id: HA, filename: HA, loaded: true, children: [], exports: fake };',
+  ].join('\n'));
+
+  const extraProcs = [];
+  async function spawnBms(optsObj, port) {
+    const optFile = path.join(TMP, 'options-' + port + '.json');
+    const dataDir = path.join(TMP, 'data-' + port);
+    fs.writeFileSync(optFile, JSON.stringify(optsObj));
+    fs.mkdirSync(dataDir, { recursive: true });
+    const p = spawn(process.execPath, ['server.js'], {
+      cwd: APP_DIR,
+      env: Object.assign({}, process.env, {
+        PORT: String(port), DATA_DIR: dataDir, OPTIONS_FILE: optFile,
+        NODE_OPTIONS: '--require ' + stubPath,
+      }),
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    p.stdout.on('data', d => { out += d; });
+    p.stderr.on('data', d => { out += d; });
+    extraProcs.push(p);
+    const deadline = Date.now() + 15000;
+    for (;;) {
+      try { const rr = await fetch('http://127.0.0.1:' + port + '/api/health'); if (rr.status) break; } catch (e) {}
+      if (Date.now() > deadline) throw new Error('serwer BMS nie wystartował:\n' + out);
+      await new Promise(res => setTimeout(res, 150));
+    }
+    return { port, log: () => out, proc: p };
+  }
+
+  const s1 = await spawnBms({
+    bms_charge_entity: 'sensor.bms_ch_total',
+    bms_discharge_entity: 'sensor.bms_dis_total',
+  }, PORT + 1);
+  const base1 = 'http://127.0.0.1:' + (PORT + 1);
+  const c1 = await (await fetch(base1 + '/api/config')).json();
+  t('S46 skonfigurowane encje BMS docierają do frontendu',
+    c1.bmsChargeEntity === 'sensor.bms_ch_total' && c1.bmsDischargeEntity === 'sensor.bms_dis_total',
+    JSON.stringify(c1));
+
+  const csv1 = await (await fetch(base1 + '/api/growatt/ha-stats.csv?start=2026-10-01&end=2026-10-02')).text();
+  t('S47 jeden CSV zawiera BMS obok Growatt',
+    /sensor\.bms_ch_total/.test(csv1) && /sensor\.bms_dis_total/.test(csv1) && /sensor\.growatt_/.test(csv1),
+    csv1.slice(0, 240));
+  t('S48 dokładnie jeden nagłówek (jeden plik, jeden parser)',
+    csv1.split('\n').filter(l => l.indexOf('statistic_id,') === 0).length === 1,
+    csv1.split('\n').slice(0, 2).join(' | '));
+
+  fs.writeFileSync(failFlag, '1');
+  const respFail = await fetch(base1 + '/api/growatt/ha-stats.csv?start=2026-10-01&end=2026-10-02');
+  const csv2 = await respFail.text();
+  t('S49 awaria BMS NIE zabija danych Growatt',
+    respFail.status === 200 && /sensor\.growatt_/.test(csv2) && !/sensor\.bms_/.test(csv2),
+    'status ' + respFail.status + ': ' + csv2.slice(0, 200));
+  t('S50 awaria BMS jest zalogowana, nie cicha',
+    /Nie pobrałem statystyk BMS/.test(s1.log()), s1.log().slice(-400));
+  fs.rmSync(failFlag, { force: true });
+
+  const s2 = await spawnBms({
+    bms_charge_entity: 'sensor.growatt_battery_battery_charge_total',   // kolizja
+    bms_discharge_entity: 'Zly ID!',                                    // śmieć
+  }, PORT + 2);
+  const c2 = await (await fetch('http://127.0.0.1:' + (PORT + 2) + '/api/config')).json();
+  t('S51 kolizja z growatt_entities odrzucona (inaczej BMS nigdy by nie zadziałał)',
+    c2.bmsChargeEntity === '', JSON.stringify(c2));
+  t('S52 nieprawidłowe entity_id odrzucone',
+    c2.bmsDischargeEntity === '', JSON.stringify(c2));
+  extraProcs.forEach(p => p.kill('SIGKILL'));
+
   console.log('\n=== Graceful shutdown (SIGTERM) ===');
   if (process.platform === 'win32') {
     // Windows nie dostarcza SIGTERM do handlerów procesu — Node zabija proces

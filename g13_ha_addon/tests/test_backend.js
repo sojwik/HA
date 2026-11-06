@@ -242,6 +242,122 @@ t('G12 fetchStatistics odrzuca niedozwolony typ statystyki', async () => {
   assert.ok(/niedozwolone typy/i.test(err.message), err.message);
 });
 
+
+console.log('\n=== M: uzgodnienie źródeł baterii BMS vs Growatt (audyt cz. 12) ===');
+const V = require('../app/lib/validate');   // ten zestaw dotąd nie używał walidatora
+const RC = V.reconcileBatteryMonth;
+const rcCfg = V.resolveConfig();
+
+t('M1 brak BMS → zostaje Growatt, bez alarmu', () => {
+  const r = RC({ charge: 100, discharge: 92, hours: 720 }, { charge: 0, discharge: 0, hours: 0 }, rcCfg);
+  assert.strictEqual(r.source, 'growatt');
+  assert.strictEqual(r.bmsAvailable, false);
+  assert.strictEqual(r.suspect, false);
+  assert.strictEqual(r.charge, 100);
+  assert.strictEqual(r.discharge, 92);
+});
+t('M2 zgodne źródła → BMS nadrzędny, bez alarmu', () => {
+  const r = RC({ charge: 562.7, discharge: 514.9, hours: 1104 },
+               { charge: 562.2, discharge: 524.9, hours: 1104 }, rcCfg);
+  assert.strictEqual(r.source, 'bms');
+  assert.strictEqual(r.suspect, false, 'strata falownika 1,9% to nie usterka');
+  assert.ok(Math.abs(r.chargeDeltaPct - 0.09) < 0.02, 'ΔCH ' + r.chargeDeltaPct);
+  assert.ok(Math.abs(r.dischargeDeltaPct + 1.91) < 0.02, 'ΔDIS ' + r.dischargeDeltaPct);
+});
+t('M3 realne okno 25.09–10.10 → alarm i BMS wygrywa', () => {
+  // Dokładne sumy z audytu cz. 12: 16 dób, Growatt 124,6/342,0, BMS 158,0/158,7.
+  const r = RC({ charge: 124.6, discharge: 342.0, hours: 384 },
+               { charge: 158.0, discharge: 158.7, hours: 384 }, rcCfg);
+  assert.strictEqual(r.source, 'bms');
+  assert.strictEqual(r.suspect, true);
+  assert.ok(Math.abs(r.dischargeDeltaPct - 115.5) < 0.2, 'ΔDIS ' + r.dischargeDeltaPct);
+  assert.ok(Math.abs(r.chargeDeltaPct + 21.14) < 0.05, 'ΔCH ' + r.chargeDeltaPct);
+  assert.strictEqual(r.charge, 158.0);
+  assert.strictEqual(r.discharge, 158.7);
+  assert.ok(/BMS/.test(r.reason), 'powód musi nazywać użyte źródło');
+});
+t('M4 BMS pokrywa połowę miesiąca → NIE podmienia (zaniżyłoby sumę)', () => {
+  const r = RC({ charge: 100, discharge: 92, hours: 720 },
+               { charge: 50, discharge: 46, hours: 360 }, rcCfg);
+  assert.strictEqual(r.source, 'growatt');
+  assert.strictEqual(r.partial, true);
+  assert.ok(/50%/.test(r.reason), r.reason);
+  assert.strictEqual(r.charge, 100);
+});
+t('M5 Growatt bez godzin, BMS z godzinami → BMS jedynym źródłem', () => {
+  const r = RC({ charge: 0, discharge: 0, hours: 0 },
+               { charge: 10, discharge: 9, hours: 24 }, rcCfg);
+  assert.strictEqual(r.source, 'bms');
+  assert.strictEqual(r.charge, 10);
+  assert.strictEqual(r.coverage, 1);
+});
+t('M6 próg 10%: 9% przechodzi, 11% łapie', () => {
+  const base = { charge: 100, discharge: 100, hours: 100 };
+  const ok = RC(Object.assign({}, base, { discharge: 109 }), base, rcCfg);
+  const bad = RC(Object.assign({}, base, { discharge: 111 }), base, rcCfg);
+  assert.strictEqual(ok.suspect, false, '9% to jeszcze tolerancja');
+  assert.strictEqual(bad.suspect, true, '11% musi być oznaczone');
+});
+t('M7 śmieciowe wejścia nie dają NaN', () => {
+  const r = RC({ charge: 'x', discharge: null, hours: undefined },
+               { charge: NaN, discharge: undefined, hours: 'y' }, rcCfg);
+  assert.strictEqual(r.source, 'growatt');
+  assert.strictEqual(r.charge, 0);
+  assert.strictEqual(r.bmsAvailable, false);
+  assert.ok(r.chargeDeltaPct === null, 'Δ bez BMS musi być null, nie NaN');
+});
+t('M8 pokrycie dokładnie na progu 90% → podmienia', () => {
+  const r = RC({ charge: 100, discharge: 92, hours: 100 },
+               { charge: 90, discharge: 83, hours: 90 }, rcCfg);
+  assert.strictEqual(r.source, 'bms', 'granica należy do ścieżki BMS');
+  assert.strictEqual(r.partial, false);
+});
+t('M10 bateria stoi: BMS 0/0 to pomiar, a fantom Growatt jest alarmem', () => {
+  const r = RC({ charge: 12, discharge: 64.8, hours: 72 },
+               { charge: 0, discharge: 0, hours: 72 }, rcCfg);
+  assert.strictEqual(r.bmsAvailable, true, 'godziny są dowodem pomiaru, nie suma');
+  assert.strictEqual(r.source, 'bms');
+  assert.strictEqual(r.charge, 0);
+  assert.strictEqual(r.discharge, 0);
+  assert.strictEqual(r.suspect, true, 'procent wobec zera jest nieokreślony, ale różnica jest realna');
+  assert.ok(/64,8|64\.8/.test(r.reason), r.reason);
+});
+t('M11 realny październik z BMS: próg AC odrzuca, próg DC przyjmuje', () => {
+  // 347,8 kWh naładowane / 338,3 rozładowane — pomiar DC, w pełni poprawny.
+  const oct = { ladowanie: 347.8, rozladowanie: 338.3 };
+  const asAc = V.validateBatteryTotal([oct], rcCfg);
+  const asDc = V.validateBatteryTotal([Object.assign({}, oct, { eta: rcCfg.batteryEtaDc })], rcCfg);
+  assert.strictEqual(asAc.impossible, true, 'przy 0,92 wychodzi fałszywy alarm');
+  assert.ok(Math.abs(asAc.excess - 5.13) < 0.05, 'nadmiar AC ' + asAc.excess);
+  assert.strictEqual(asDc.impossible, false, 'przy 0,94 miesiąc musi przejść');
+  assert.ok(asDc.excess < 0, 'nadmiar DC ' + asDc.excess);
+});
+t('M12 bez nadpisania sprawności wynik identyczny jak przed zmianą', () => {
+  const r = V.validateBatteryTotal([{ ladowanie: 2398.9, rozladowanie: 2442.1 }], rcCfg);
+  assert.ok(Math.abs(r.maxDischarge - 0.92 * (2398.9 + 14.34)) < 0.01, 'max ' + r.maxDischarge);
+  assert.ok(Math.abs(r.excess - 221.92) < 0.05, 'nadmiar ' + r.excess);
+  assert.strictEqual(r.eta, 0.92);
+  assert.strictEqual(r.impossible, true);
+});
+t('M13 suma miesza źródła: każdy miesiąc z własną sprawnością', () => {
+  const r = V.validateBatteryTotal([
+    { ladowanie: 100, rozladowanie: 90, eta: 0.94 },   // z BMS (DC)
+    { ladowanie: 100, rozladowanie: 90, eta: 0.92 },   // z Growatt (AC)
+  ], rcCfg);
+  // Σ ηᵢ×CHᵢ + max(ηᵢ)×cap = 186 + 0,94×14,34 = 199,48
+  assert.ok(Math.abs(r.maxDischarge - 199.48) < 0.01, 'max ' + r.maxDischarge);
+  assert.strictEqual(r.eta, 0.93, 'sprawność efektywna ważona ładowaniem');
+  assert.strictEqual(r.impossible, false);
+});
+t('M9 próg konfigurowalny przez resolveConfig', () => {
+  const strict = V.resolveConfig({ bmsTolerancePct: 1 });
+  const r = RC({ charge: 100, discharge: 102, hours: 10 },
+               { charge: 100, discharge: 100, hours: 10 }, strict);
+  assert.strictEqual(r.suspect, true, '2% przy progu 1% musi być alarmem');
+  assert.strictEqual(strict.bmsTolerancePct, 1);
+  assert.strictEqual(V.resolveConfig().bmsMinCoverage, 0.90);
+});
+
 // sprzątanie
 fs.rmSync(TMP, { recursive: true, force: true });
 

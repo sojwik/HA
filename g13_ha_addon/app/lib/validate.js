@@ -40,7 +40,24 @@
     // nie nominalne, i zawyżało pojemność o 14%.
     batteryCapacityKwh: 14.34,
     batteryEta: 0.92,
+    // Sprawność po stronie DC, czyli tam, gdzie mierzy BMS. Wyznaczona z TYCH
+    // SAMYCH 46 zdrowych dób, na których wyznaczono 0.92 dla AC:
+    //   BMS (DC):      524,9 / 562,2 = 0,9335
+    //   Growatt (AC):  514,9 / 562,7 = 0,9151
+    // Różnica 2% to strata falownika. Zaokrąglone w górę tak samo jak 0.92
+    // względem zmierzonego 0.9171 — żeby nie robić fałszywych alarmów.
+    // Bez tego październik liczony z BMS (338,3 / 347,8 = 0,973) nadal byłby
+    // oznaczony jako niemożliwy, mimo że jest w pełni poprawny.
+    batteryEtaDc: 0.94,
     maxGapHours: 24,       // dłuższa luka → nie ufamy delcie jako jednemu oknu
+    // BMS vs Growatt (audyt cz. 12). Poza oknem usterki źródła różniły się
+    // o 0,1% (ładowanie) i 1,9% (rozładowanie) — to strata falownika DC→AC.
+    // 10% jest więc safely powyżej szumu, a 115% z okna 24.09–11.10 łapie się
+    // z ogromnym zapasem.
+    bmsTolerancePct: 10,
+    // Gdy BMS pokrywa mniej niż 90% godzin Growatt, podmiana zaniżyłaby
+    // miesiąc. Wtedy zostajemy przy Growatt i tylko ostrzegamy.
+    bmsMinCoverage: 0.90,
   };
 
   function resolveConfig(overrides) {
@@ -51,7 +68,12 @@
       batteryCapacityKwh: typeof o.batteryCapacityKwh === 'number'
         ? o.batteryCapacityKwh : DEFAULT_LIMITS.batteryCapacityKwh,
       batteryEta: typeof o.batteryEta === 'number' ? o.batteryEta : DEFAULT_LIMITS.batteryEta,
+      batteryEtaDc: typeof o.batteryEtaDc === 'number' ? o.batteryEtaDc : DEFAULT_LIMITS.batteryEtaDc,
       maxGapHours: typeof o.maxGapHours === 'number' ? o.maxGapHours : DEFAULT_LIMITS.maxGapHours,
+      bmsTolerancePct: typeof o.bmsTolerancePct === 'number'
+        ? o.bmsTolerancePct : DEFAULT_LIMITS.bmsTolerancePct,
+      bmsMinCoverage: typeof o.bmsMinCoverage === 'number'
+        ? o.bmsMinCoverage : DEFAULT_LIMITS.bmsMinCoverage,
     };
   }
 
@@ -252,14 +274,31 @@
     const cap = c.batteryCapacityKwh;
     const eta = c.batteryEta;
     let charge = 0, discharge = 0, n = 0;
+    // Każdy miesiąc może mieć WŁASNĄ sprawność, bo może pochodzić z innego
+    // źródła: BMS mierzy DC (η 0,94), Growatt AC (η 0,92). Liczenie całości
+    // jedną sprawnością AC zawyżałoby nadmiar dla miesięcy z BMS.
+    //   maxDischarge = Σ ηᵢ × chargeᵢ + max(ηᵢ) × capacity
+    // Pojemność startowa należy do najbardziej korzystnej sprawności — to
+    // zawyżenie na korzyść danych, tak jak w pierwotnym wzorze.
+    let maxFromCharge = 0, etaMax = 0, etaWeighted = 0;
     (months || []).forEach(function (m) {
       if (!m) return;
       const ch = Number(m.ladowanie), dis = Number(m.rozladowanie);
-      if (isFinite(ch)) charge += ch;
+      const e = (typeof m.eta === 'number' && isFinite(m.eta) && m.eta > 0 && m.eta <= 1)
+        ? m.eta : eta;
+      if (isFinite(ch)) {
+        charge += ch;
+        const pos = Math.max(0, ch);
+        maxFromCharge += e * pos;
+        etaWeighted += e * pos;
+      }
       if (isFinite(dis)) discharge += dis;
+      if (e > etaMax) etaMax = e;
       n++;
     });
-    const maxDischarge = eta * (charge + cap);
+    if (!n) etaMax = eta;
+    const maxDischarge = maxFromCharge + etaMax * cap;
+    const etaEffective = charge > 0 ? etaWeighted / charge : eta;
     const excess = discharge - maxDischarge;
     // Próg 0,5 kWh jak w twardym limicie miesięcznym — poniżej tego to szum
     // zaokrągleń liczników (0,1 kWh na godzinę).
@@ -269,7 +308,7 @@
       charge: round2(charge),
       discharge: round2(discharge),
       capacity: cap,
-      eta: eta,
+      eta: round2(etaEffective),
       apparentEfficiency: charge > 0 ? round2(discharge / charge * 100) : null,
       maxDischarge: round2(maxDischarge),
       excess: round2(excess),
@@ -281,6 +320,98 @@
            + ' kWh — nadmiar ' + excess.toFixed(1) + ' kWh')
         : null,
     };
+  }
+
+  /* --------------------------------------------------------------------------
+   * reconcileBatteryMonth — które źródło liczy baterię: BMS czy Growatt.
+   *
+   * POWÓD (audyt cz. 12, pomiar rozstrzygający). W oknie 24.09–11.10.2026
+   * liczniki Growatt pokazały 342,0 kWh rozładowania, a BMS po stronie DC
+   * 158,7 kWh (+115%). Ładowanie odwrotnie: 124,6 kWh z Growatt przy 158,0 kWh
+   * z BMS (−21%). Poza tym oknem, na 46 dobach, źródła zgadzały się na 0,1%
+   * (ładowanie) i 1,9% (rozładowanie) — ta druga różnica to strata falownika.
+   *
+   * BMS mierzy prąd i napięcie na ZACISKACH paczki, więc nie zależy od mapy
+   * rejestrów falownika ani od wersji integracji Growatt. Dlatego gdy jest
+   * dostępny i pokrywa miesiąc, jest źródłem nadrzędnym.
+   *
+   * Rozbieżność jest ZWRACANA, nie ukryta — to jedyny sposób, żeby kolejna
+   * taka usterka została zauważona automatycznie, a nie po miesiącu.
+   *
+   * @param {{charge:number,discharge:number,hours:number}} growatt
+   * @param {{charge:number,discharge:number,hours:number}} bms
+   * @param {object} cfg wynik resolveConfig()
+   * ------------------------------------------------------------------------*/
+  function reconcileBatteryMonth(growatt, bms, cfg) {
+    const c = cfg || resolveConfig();
+    const g = growatt || {}, b = bms || {};
+    const f = function (v) { const n = Number(v); return isFinite(n) ? n : 0; };
+    const gCh = f(g.charge), gDis = f(g.discharge), gH = f(g.hours);
+    const bCh = f(b.charge), bDis = f(b.discharge), bH = f(b.hours);
+
+    // Zero to POMIAR, nie brak danych. Bateria może stać cały miesiąc
+    // (pełna paczka, brak nadwyżek) — wtedy BMS poprawnie pokazuje 0/0,
+    // a Growatt potrafi w tym samym czasie wymyślić energię. Warunek
+    // oparty na godzinach, nie na sumie energii.
+    const hasBms = bH > 0;
+    // Pokrycie względem Growatt. Gdy Growatt nie ma godzin, a BMS ma —
+    // BMS jest jedynym źródłem i pokrycie traktujemy jako pełne.
+    const coverage = gH > 0 ? bH / gH : (bH > 0 ? 1 : null);
+    const dCh = (hasBms && bCh > 0) ? (gCh - bCh) / bCh * 100 : null;
+    const dDis = (hasBms && bDis > 0) ? (gDis - bDis) / bDis * 100 : null;
+    const worst = Math.max(dCh === null ? 0 : Math.abs(dCh),
+                           dDis === null ? 0 : Math.abs(dDis));
+    // Procent wobec zera jest nieokreślony, więc różnicę 0 vs coś łapiemy
+    // bezwzględnie. Próg 0,5 kWh jak w twardym limicie bilansu.
+    const zeroMismatch = hasBms && ((bCh === 0 && gCh > 0.5) || (bDis === 0 && gDis > 0.5));
+    const suspect = hasBms && (worst > c.bmsTolerancePct || zeroMismatch);
+
+    const out = {
+      source: 'growatt',
+      bmsAvailable: hasBms,
+      charge: round2(gCh),
+      discharge: round2(gDis),
+      growattCharge: round2(gCh),
+      growattDischarge: round2(gDis),
+      bmsCharge: round2(bCh),
+      bmsDischarge: round2(bDis),
+      growattHours: gH,
+      bmsHours: bH,
+      coverage: coverage === null ? null : round2(coverage * 100) / 100,
+      chargeDeltaPct: dCh === null ? null : round2(dCh),
+      dischargeDeltaPct: dDis === null ? null : round2(dDis),
+      suspect: suspect,
+      partial: false,
+      reason: null,
+    };
+    if (!hasBms) return out;
+
+    if (gH > 0 && coverage < c.bmsMinCoverage) {
+      out.partial = true;
+      out.reason = 'BMS pokrywa tylko ' + Math.round(coverage * 100) + '% godzin Growatt ('
+        + bH + ' z ' + gH + ') — zostaję przy Growatt, żeby nie zaniżyć miesiąca.';
+      return out;
+    }
+
+    out.source = 'bms';
+    out.charge = round2(bCh);
+    out.discharge = round2(bDis);
+    if (suspect) {
+      const parts = [];
+      if (dCh !== null && Math.abs(dCh) > c.bmsTolerancePct) {
+        parts.push('ładowanie ' + (dCh > 0 ? '+' : '') + dCh.toFixed(1) + '%');
+      } else if (bCh === 0 && gCh > 0.5) {
+        parts.push('ładowanie ' + gCh.toFixed(1) + ' kWh wg Growatt przy 0 kWh z BMS');
+      }
+      if (dDis !== null && Math.abs(dDis) > c.bmsTolerancePct) {
+        parts.push('rozładowanie ' + (dDis > 0 ? '+' : '') + dDis.toFixed(1) + '%');
+      } else if (bDis === 0 && gDis > 0.5) {
+        parts.push('rozładowanie ' + gDis.toFixed(1) + ' kWh wg Growatt przy 0 kWh z BMS');
+      }
+      out.reason = 'Growatt różni się od BMS: ' + parts.join(', ')
+        + '. Użyłem BMS — to pomiar DC na zaciskach paczki, niezależny od falownika.';
+    }
+    return out;
   }
 
   /* --------------------------------------------------------------------------
@@ -504,6 +635,7 @@
     createRejectionLog,
     validateBatteryMonth,
     validateBatteryTotal,
+    reconcileBatteryMonth,
     monthKeyFromUtc,
     hourKeyFromUtc,
     localHourLabel,

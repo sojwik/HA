@@ -28,14 +28,14 @@ function extractFn(name) {
 }
 
 const NAMES = ['parsePlNumber', 'normalizeHeader', 'parseDateFlexible', 'extractHour',
-  'classifyGrowattHaSensor', 'parseHaStatisticsCsv', 'estimateGridCharge',
+  'classifyGrowattHaSensor', 'applyBmsEntityMap', 'parseHaStatisticsCsv', 'estimateGridCharge',
   'hourlyDepositValue', 'addMonths', 'allHoursCoveredForDate', 'extractHourFromApiRecord',
   'runBatteryValidation', 'round2', 'formatMonthLabel', 'computeTranches'];
 
 const logs = [];
 const sandbox = {
-  V, validateCfg: V.resolveConfig(), console,
-  state: { haHourly: {}, haBatteryCheck: {}, haRejected: {}, rceHourly: {}, months: {}, refundRate: 0.30, refundCapBasis: 'base' },
+  V, validateCfg: V.resolveConfig(), console, bmsEntityMap: {},
+  state: { haHourly: {}, haBatteryCheck: {}, haRejected: {}, bmsCheck: {}, rceHourly: {}, months: {}, refundRate: 0.30, refundCapBasis: 'base' },
   log: (m, l) => logs.push({ m, l }),
   Math, Date, JSON, Number, String, Object, Array, Set, Map, isFinite, isNaN, parseInt, parseFloat, Infinity, NaN,
   MONTH_NAMES: ['styczeń','luty','marzec','kwiecień','maj','czerwiec','lipiec','sierpień','wrzesień','październik','listopad','grudzień'],
@@ -346,6 +346,146 @@ t('X2 łatka XSS faktycznie jest w pliku', () => {
 t('X3 SheetJS nie z CDN', () => {
   assert.ok(!HTML.includes('cdnjs.cloudflare.com'), 'CDN musi zniknąć');
   assert.ok(HTML.includes('vendor/xlsx.full.min.js'), 'lokalna kopia musi być');
+});
+
+
+console.log('\n=== N: BMS jako źródło nadrzędne baterii (F41–F43) ===');
+const GW_CH = 'sensor.growatt_battery_battery_charge_total';
+const GW_DIS = 'sensor.growatt_battery_battery_discharge_total';
+const BMS_CH = 'sensor.woda_lfp_charging_total';
+const BMS_DIS = 'sensor.woda_lfp_discharging_total';
+
+/* CSV w formacie backendu. Godziny UTC, etykieta lokalna +02:00 (październik
+ * przed zmianą czasu), żeby monthKeyFromUtc trafiał w ten sam miesiąc. */
+function bmsCsv(series, hours){
+  const lines = ['statistic_id,start,start_utc,sum,delta,delta_sum'];
+  const t0 = Date.UTC(2026, 9, 1, 0);
+  series.forEach(function(s){
+    let sum = 0;
+    for (let i = 0; i < hours; i++){
+      const ts = t0 + i * 3600000;
+      const v = Array.isArray(s[1]) ? s[1][i] : s[1];
+      sum += v;
+      const utc = new Date(ts).toISOString().slice(0, 19) + 'Z';
+      const loc = new Date(ts + 2 * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+      lines.push([s[0], loc, utc, sum.toFixed(4), v, v].join(','));
+    }
+  });
+  return lines.join('\n') + '\n';
+}
+function parseCsvSimple(text){
+  return text.trim().split('\n').map(function(l){ return l.split(','); });
+}
+function runParse(series, hours, withBms){
+  sandbox.applyBmsEntityMap(withBms === false ? {} : { bmsChargeEntity: BMS_CH, bmsDischargeEntity: BMS_DIS });
+  return sandbox.parseHaStatisticsCsv(parseCsvSimple(bmsCsv(series, hours)), 'test-bms.csv');
+}
+
+t('N1 klasyfikator: BMS osobno, Growatt bez zmian, obcy → null', () => {
+  sandbox.applyBmsEntityMap({ bmsChargeEntity: BMS_CH, bmsDischargeEntity: BMS_DIS });
+  assert.strictEqual(sandbox.classifyGrowattHaSensor(BMS_CH), 'bmsLadowanie');
+  assert.strictEqual(sandbox.classifyGrowattHaSensor(BMS_DIS), 'bmsRozladowanie');
+  assert.strictEqual(sandbox.classifyGrowattHaSensor(GW_CH), 'ladowanie');
+  assert.strictEqual(sandbox.classifyGrowattHaSensor('sensor.cokolwiek'), null);
+  sandbox.applyBmsEntityMap({});
+  assert.strictEqual(sandbox.classifyGrowattHaSensor(BMS_CH), null, 'bez konfiguracji BMS jest obcy');
+});
+t('N2 pełne pokrycie: miesiąc liczy się z BMS, Growatt zachowany do porównania', () => {
+  const p = runParse([[GW_CH, 0.2], [GW_DIS, 0.9], [BMS_CH, 0.25], [BMS_DIS, 0.45]], 72);
+  const m = p.monthly['2026-10'];
+  assert.ok(Math.abs(m.ladowanie - 72 * 0.25) < 1e-6, 'ładowanie ' + m.ladowanie);
+  assert.ok(Math.abs(m.rozladowanie - 72 * 0.45) < 1e-6, 'rozładowanie ' + m.rozladowanie);
+  assert.ok(Math.abs(m.growattLadowanie - 72 * 0.2) < 1e-6, 'ślad Growatt musi zostać');
+  assert.ok(Math.abs(m.growattRozladowanie - 72 * 0.9) < 1e-6);
+  assert.strictEqual(p.bms['2026-10'].source, 'bms');
+});
+t('N3 oba źródła NIE są sumowane', () => {
+  const p = runParse([[GW_CH, 0.2], [GW_DIS, 0.9], [BMS_CH, 0.25], [BMS_DIS, 0.45]], 72);
+  const m = p.monthly['2026-10'];
+  assert.ok(Math.abs(m.bmsLadowanie - 72 * 0.25) < 1e-6, 'BMS trzymany osobno');
+  assert.ok(m.ladowanie < 72 * 0.45, 'gdyby sumowało, byłoby 0,45/h');
+});
+t('N4 godziny też podmienione — suma godzin równa sumie miesiąca', () => {
+  const p = runParse([[GW_CH, 0.2], [GW_DIS, 0.9], [BMS_CH, 0.25], [BMS_DIS, 0.45]], 72);
+  const hs = p.hourly['2026-10'];
+  let c = 0, d = 0;
+  hs.forEach(function(h){ c += h.ladowanie; d += h.rozladowanie; });
+  assert.ok(Math.abs(c - p.monthly['2026-10'].ladowanie) < 1e-6, 'godziny ' + c);
+  assert.ok(Math.abs(d - p.monthly['2026-10'].rozladowanie) < 1e-6);
+  assert.ok(Math.abs(hs[0].rozladowanie - 0.45) < 1e-9, 'godzinowa wartość musi być z BMS');
+});
+t('N5 usterka Growatt wykryta i zalogowana jako błąd', () => {
+  const before = logs.length;
+  const p = runParse([[GW_CH, 0.2], [GW_DIS, 0.9], [BMS_CH, 0.25], [BMS_DIS, 0.45]], 72);
+  assert.strictEqual(p.bms['2026-10'].suspect, true);
+  assert.ok(Math.abs(p.bms['2026-10'].dischargeDeltaPct - 100) < 0.01,
+    'ΔDIS ' + p.bms['2026-10'].dischargeDeltaPct);
+  assert.ok(logs.slice(before).some(function(l){ return l.l === 'error' && /Kontrola krzyżowa/.test(l.m); }),
+    'rozbieżność musi być widoczna w logu');
+});
+t('N6 luka w BMS: godzina uzupełniona z Growatt, nie wyzerowana', () => {
+  const bCh = new Array(72).fill(0.25); bCh[10] = 0;
+  const bDis = new Array(72).fill(0.45); bDis[10] = 0;
+  // Godzina 10 istnieje w BMS z zerem, ale usuńmy ją z CSV zupełnie:
+  const lines = ['statistic_id,start,start_utc,sum,delta,delta_sum'];
+  const t0 = Date.UTC(2026, 9, 1, 0);
+  [[GW_CH, 0.2], [GW_DIS, 0.9], [BMS_CH, 0.25], [BMS_DIS, 0.45]].forEach(function(s){
+    let sum = 0;
+    for (let i = 0; i < 72; i++){
+      const isBms = s[0] === BMS_CH || s[0] === BMS_DIS;
+      if (isBms && i === 10) continue;
+      const ts = t0 + i * 3600000;
+      sum += s[1];
+      const utc = new Date(ts).toISOString().slice(0, 19) + 'Z';
+      const loc = new Date(ts + 2 * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+      lines.push([s[0], loc, utc, sum.toFixed(4), s[1], s[1]].join(','));
+    }
+  });
+  sandbox.applyBmsEntityMap({ bmsChargeEntity: BMS_CH, bmsDischargeEntity: BMS_DIS });
+  const p = sandbox.parseHaStatisticsCsv(parseCsvSimple(lines.join('\n') + '\n'), 'luka.csv');
+  const dec = p.bms['2026-10'];
+  assert.strictEqual(dec.source, 'bms', 'pokrycie 71/72 = 98,6% > 90%');
+  assert.strictEqual(dec.hoursFromGrowatt, 1, 'dokładnie jedna godzina z Growatt');
+  assert.strictEqual(dec.hoursFromBms, 71);
+  const gap = p.hourly['2026-10'].filter(function(h){ return h.ts === t0 + 10 * 3600000; })[0];
+  assert.ok(Math.abs(gap.rozladowanie - 0.9) < 1e-9, 'luka musi zostać z Growatt, nie zero');
+});
+t('N7 BMS podlega temu samemu progowi mocy co Growatt', () => {
+  const absurd = new Array(72).fill(0.25); absurd[5] = 500;   // 500 kWh/h przy 14,6 kW
+  const p = runParse([[GW_CH, 0.2], [GW_DIS, 0.9], [BMS_CH, absurd], [BMS_DIS, 0.45]], 72);
+  assert.ok(p.rejected.byRole.bmsLadowanie, 'odrzucenie musi być przypisane roli BMS');
+  assert.strictEqual(p.rejected.byRole.bmsLadowanie.count, 1);
+  assert.ok(p.monthly['2026-10'].bmsLadowanie < 100, '500 kWh nie może wejść do sumy');
+});
+t('N8 BMS wyłączony → zachowanie identyczne jak przed zmianą', () => {
+  const p = runParse([[GW_CH, 0.2], [GW_DIS, 0.9]], 72, false);
+  const m = p.monthly['2026-10'];
+  assert.ok(Math.abs(m.ladowanie - 72 * 0.2) < 1e-6);
+  assert.ok(Math.abs(m.rozladowanie - 72 * 0.9) < 1e-6);
+  assert.strictEqual(p.bms['2026-10'].source, 'growatt');
+  assert.strictEqual(p.bms['2026-10'].bmsAvailable, false);
+});
+t('N9 zerowe godziny to nadal pomiar, nie brak pokrycia', () => {
+  // Pierwsza doba bateria stoi: OBA kanały 0. Liczenie pokrycia z wartości
+  // niezerowych zaniżyłoby je do 48/72 = 67% i cofnęło miesiąc do Growatt.
+  const bCh = new Array(72).fill(0);
+  const bDis = new Array(72).fill(0.45);
+  for (let i = 0; i < 24; i++) bDis[i] = 0;
+  const p = runParse([[GW_CH, 0.2], [GW_DIS, 0.9], [BMS_CH, bCh], [BMS_DIS, bDis]], 72);
+  const dec = p.bms['2026-10'];
+  assert.strictEqual(dec.bmsHours, 72, 'zero nie może obniżać pokrycia');
+  assert.strictEqual(dec.source, 'bms');
+  assert.strictEqual(p.monthly['2026-10'].ladowanie, 0);
+  assert.ok(Math.abs(p.monthly['2026-10'].rozladowanie - 48 * 0.45) < 1e-6);
+});
+t('N10 bateria stoi cały miesiąc: fantom Growatt nie wchodzi do rozliczenia', () => {
+  const zero = new Array(72).fill(0);
+  const p = runParse([[GW_CH, 0.2], [GW_DIS, 0.9], [BMS_CH, zero], [BMS_DIS, zero]], 72);
+  const dec = p.bms['2026-10'];
+  assert.strictEqual(dec.source, 'bms');
+  assert.strictEqual(dec.suspect, true, 'Growatt 64,8 kWh przy BMS 0 kWh to usterka');
+  assert.strictEqual(p.monthly['2026-10'].rozladowanie, 0);
+  assert.ok(Math.abs(p.monthly['2026-10'].growattRozladowanie - 64.8) < 1e-6, 'ślad Growatt zostaje');
 });
 
 console.log(`\n${pass} przeszło, ${fail} nie przeszło`);

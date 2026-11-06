@@ -122,7 +122,7 @@ function serveDir(dir) {
   // Strona SAMA definiuje window.storage (shim na fetch do api/kv), więc
   // podstawienie window.storage w beforeParse nie działa — zostanie nadpisane.
   // Podmieniamy fetch, czyli warstwę, z której ten shim faktycznie korzysta.
-  async function loadWithCache(cacheValue, extraKv, apiConfig, apiCsv) {
+  async function loadWithCache(cacheValue, extraKv, apiConfig, apiCsv, growattCsv) {
     const kv = Object.assign({ 'rce-cache': cacheValue }, extraKv || {});
     const calls = [];
     const dom2 = await JSDOM.fromURL(`http://127.0.0.1:${port}/index.html`, {
@@ -131,11 +131,34 @@ function serveDir(dir) {
       virtualConsole: vc,
       beforeParse(window) {
         window.XLSX = { read: () => ({ SheetNames: ['a'], Sheets: { a: {} } }), utils: { sheet_to_json: () => [] } };
+        // jsdom nie implementuje Blob.text(). Przy imporcie ręcznym dało się
+        // poprawić pojedynczy plik z zewnątrz, ale autosync tworzy File
+        // WEWNĄTRZ aplikacji — trzeba uzupełnić prototyp. Przeglądarki mają
+        // tę metodę, więc to wyłącznie luka harnessu, nie usterka dodatku.
+        if (window.Blob && typeof window.Blob.prototype.text !== 'function') {
+          window.Blob.prototype.text = function () {
+            const blob = this;
+            return new Promise((resolve, reject) => {
+              const fr = new window.FileReader();
+              fr.onload = () => resolve(String(fr.result));
+              fr.onerror = () => reject(fr.error || new Error('FileReader'));
+              fr.readAsText(blob);
+            });
+          };
+        }
         window.fetch = (url, opts) => {
           const u = String(url);
           calls.push(u);
           // F40: eksport encji. Odpowiedź podstawialna, żeby sprawdzić
           // ścieżkę pustą i ścieżkę z danymi.
+          // F41–F45: autosync Growatt+BMS. Odpowiedź podstawialna, żeby
+          // przećwiczyć cały tor: config → mapa encji → CSV → uzgodnienie → panel.
+          if (/api\/growatt\/ha-stats\.csv/.test(u)) {
+            if (growattCsv === null || growattCsv === undefined) {
+              return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: 'not_found' }), text: () => Promise.resolve('') });
+            }
+            return Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve(growattCsv), json: () => Promise.resolve({}) });
+          }
           if (/api\/ha\/stats\.csv/.test(u)) {
             if (apiCsv === null || apiCsv === undefined) {
               return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({ error: 'not_found' }), text: () => Promise.resolve('') });
@@ -403,6 +426,77 @@ function serveDir(dir) {
     /state_class/.test(dq.getElementById('exportEntitiesStatus').textContent),
     'status: ' + dq.getElementById('exportEntitiesStatus').textContent);
   dEmpty.window.close();
+
+
+  console.log('\n=== D39–D44: kontrola krzyżowa BMS vs Growatt (F41–F45) ===');
+  const BMS_CH_ID = 'sensor.bms_ch_total';
+  const BMS_DIS_ID = 'sensor.bms_dis_total';
+  function bmsFixture(hours, gCh, gDis, bCh, bDis){
+    const lines = ['statistic_id,start,start_utc,sum,delta,delta_sum'];
+    const t0 = Date.UTC(2026, 9, 1, 0);
+    const series = [
+      ['sensor.growatt_battery_battery_charge_total', gCh],
+      ['sensor.growatt_battery_battery_discharge_total', gDis],
+    ];
+    if (bCh !== null){
+      series.push([BMS_CH_ID, bCh], [BMS_DIS_ID, bDis]);
+    }
+    series.forEach(function(s){
+      let sum = 0;
+      for (let i = 0; i < hours; i++){
+        const ts = t0 + i * 3600000;
+        sum += s[1];
+        const utc = new Date(ts).toISOString().slice(0, 19) + 'Z';
+        const loc = new Date(ts + 2 * 3600000).toISOString().slice(0, 19).replace('T', ' ');
+        lines.push([s[0], loc, utc, sum.toFixed(4), s[1], s[1]].join(','));
+      }
+    });
+    return lines.join('\n') + '\n';
+  }
+  const cfgBms = {
+    historyMonthsBack: 24, refreshIntervalMinutes: 60,
+    bmsChargeEntity: BMS_CH_ID, bmsDischargeEntity: BMS_DIS_ID,
+  };
+
+  const dNoBms = await loadWithCache(null, {});
+  t('D39 bez BMS panel pokazuje instrukcję, nie pusty stół',
+    /bms_charge_entity/.test(dNoBms.window.document.getElementById('bmsCompareBody').textContent),
+    dNoBms.window.document.getElementById('bmsCompareBody').textContent.slice(0, 160));
+  dNoBms.window.close();
+
+  // Growatt 0,9 kWh/h rozładowania vs BMS 0,45 → +100%, czyli dokładnie
+  // mechanizm usterki z okna 24.09–11.10 (tam było +115%).
+  const dBms = await loadWithCache(null, {}, cfgBms, undefined, bmsFixture(72, 0.2, 0.9, 0.25, 0.45));
+  const db = dBms.window.document;
+  const rowText = db.getElementById('bmsCompareBody').textContent;
+  // Uwaga: samo /BMS/ daje fałszywy pozytyw — pusty stan też zawiera „BMS”
+  // w instrukcji. Sprawdzamy WIERSZ miesiąca i znacznik wybranego źródła.
+  const srcTag = db.querySelector('#bmsCompareBody .tag-manual');
+  t('D40 tabela pokazuje wiersz miesiąca i wybrane źródło BMS',
+    /październik/.test(rowText) && srcTag && srcTag.textContent === 'BMS',
+    rowText.slice(0, 240) + ' | tag: ' + (srcTag ? srcTag.textContent : 'brak'));
+  t('D41 rozbieżność +100% oznaczona jako alarm',
+    /\+100,0%|\+100\.0%/.test(rowText) && /UWAGA/.test(db.getElementById('bmsCompareStatus').textContent),
+    'wiersz: ' + rowText.slice(0, 200) + ' | status: ' + db.getElementById('bmsCompareStatus').textContent);
+  const batRow = db.getElementById('realBatteryBody').textContent;
+  t('D42 rozliczenie magazynu używa BMS (32,4 kWh), nie Growatt (64,8 kWh)',
+    /32,4/.test(batRow) && !/64,8/.test(batRow), batRow.slice(0, 240));
+  const savedLedger = dBms.__kv['monthly-ledger'] ? JSON.parse(dBms.__kv['monthly-ledger']) : null;
+  t('D43 wynik kontroli zapisany w KV (przetrwa restart)',
+    savedLedger && savedLedger.bmsCheck && savedLedger.bmsCheck['2026-10']
+      && savedLedger.bmsCheck['2026-10'].source === 'bms',
+    savedLedger ? JSON.stringify(savedLedger.bmsCheck).slice(0, 240) : 'brak monthly-ledger');
+  dBms.window.close();
+
+  // Odtworzenie z KV bez ponownego pobierania — panel musi wrócić z zapisu.
+  const dRestore = await loadWithCache(null, { 'monthly-ledger': dBms.__kv['monthly-ledger'] }, cfgBms);
+  const restoredTag = dRestore.window.document.querySelector('#bmsCompareBody .tag-manual');
+  t('D44 po restarcie panel wraca z KV, mimo braku synchronizacji',
+    /październik/.test(dRestore.window.document.getElementById('bmsCompareBody').textContent)
+      && restoredTag && restoredTag.textContent === 'BMS',
+    dRestore.window.document.getElementById('bmsCompareBody').textContent.slice(0, 200)
+      + ' | tag: ' + (restoredTag ? restoredTag.textContent : 'brak'));
+  dRestore.window.close();
 
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
