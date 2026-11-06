@@ -89,7 +89,7 @@ for (const r of ch) {
   });
 }
 
-console.log('\n=== Miesięczny test rozstępu SOC (pojemność 16,35 kWh, η=0,92) ===');
+console.log('\n=== Miesięczny test rozstępu SOC (pojemność nominalna 14,34 kWh, η=0,92) ===');
 console.log('  miesiąc    rozstęp   ×poj.   wyrok');
 const EXPECT = { '2026-08': 1.00, '2026-09': 5.62, '2026-10': 9.75 };
 for (const mk of Object.keys(byMonth).sort()) {

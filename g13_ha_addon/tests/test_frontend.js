@@ -202,15 +202,15 @@ if (CSV) {
   console.log('\n=== F16: miesięczny test baterii ===');
   sandbox.state.haHourly = parsed.hourly;
   sandbox.runBatteryValidation();
-  t('B1 sierpień przechodzi (1,00× pojemność)', () => {
+  t('B1 sierpień przechodzi (1,14× pojemności nominalnej, tolerancja 20%)', () => {
     const b = sandbox.state.haBatteryCheck['2026-08'];
     assert.ok(b.plausible, 'sierpień musi przejść');
-    assert.ok(Math.abs(b.ratio - 1.0) < 0.05, 'ratio ' + b.ratio);
+    assert.ok(Math.abs(b.ratio - 1.14) < 0.05, 'ratio ' + b.ratio);
   });
-  t('B2 wrzesień odrzucony (5,6×)', () => {
+  t('B2 wrzesień odrzucony (6,4×)', () => {
     const b = sandbox.state.haBatteryCheck['2026-09'];
     assert.ok(!b.plausible);
-    assert.ok(Math.abs(b.ratio - 5.62) < 0.1, 'ratio ' + b.ratio);
+    assert.ok(Math.abs(b.ratio - 6.41) < 0.1, 'ratio ' + b.ratio);
   });
   t('B3 październik odrzucony (9,8×) i twardo niemożliwy', () => {
     const b = sandbox.state.haBatteryCheck['2026-10'];

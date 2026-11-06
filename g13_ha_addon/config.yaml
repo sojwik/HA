@@ -1,5 +1,5 @@
 name: "G13 Depozyt Prosumencki"
-version: "0.2.3"
+version: "0.2.4"
 slug: "g13_depozyt_calc"
 description: "Kalkulator depozytu prosumenckiego TAURON G13 z automatycznym pobieraniem danych Growatt z Home Assistant i walidacją fizyczną pomiarów."
 arch:
@@ -43,7 +43,7 @@ options:
   # 3,20 V/ogniwo → 14,34 kWh (nominalna)
   # 3,45 V/ogniwo → 15,46 kWh (przy ładowaniu)
   # 3,65 V/ogniwo → 16,35 kWh (szczyt) — użyta jako górna granica w teście SOC
-  battery_capacity_kwh: 16.35
+  battery_capacity_kwh: 14.34
   battery_eta: 0.92
   # Włącz, jeśli port 8099 jest wystawiony poza ingress.
   # Wymaga ustawienia zmiennej środowiskowej ADDON_TOKEN.

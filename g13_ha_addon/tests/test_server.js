@@ -124,7 +124,13 @@ function waitForServer(timeoutMs) {
   console.log('\n=== Konfiguracja zawiera progi ===');
   r = await req('GET', '/api/config');
   t('S25 limitsKw w konfiguracji', r.json && r.json.limitsKw && r.json.limitsKw.poborHa === 16.0);
-  t('S26 pojemność baterii', r.json && r.json.batteryCapacityKwh === 16.35);
+  t('S26 pojemność baterii = nominalna 14,34 kWh', r.json && r.json.batteryCapacityKwh === 14.34);
+  // Regresja: serwer miał własną wartość domyślną, niezależną od validate.js.
+  // Przy zmianie pojemności trzeba by pamiętać o dwóch miejscach.
+  const Vcheck = require('../app/lib/validate');
+  t('S30 serwer i walidator zgadzają się co do pojemności',
+    r.json && r.json.batteryCapacityKwh === Vcheck.resolveConfig().batteryCapacityKwh,
+    'serwer: ' + (r.json && r.json.batteryCapacityKwh) + ', walidator: ' + Vcheck.resolveConfig().batteryCapacityKwh);
 
   console.log('\n=== CSP musi dopuszczać hosta, którego używa frontend ===');
   // Regresja: CSP miało api.pse.pl, a frontend api.raporty.pse.pl. Przeglądarka
