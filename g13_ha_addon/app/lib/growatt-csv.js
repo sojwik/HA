@@ -87,4 +87,43 @@ function statisticsToCsv(statisticsResult) {
   return lines.join('\n') + '\n';
 }
 
-module.exports = { statisticsToCsv, toWarsawString, toUtcKey };
+/* ============================================================================
+ * anyStatsToCsv — eksport DOWOLNYCH encji, także chwilowych (BMS).
+ *
+ * Dlaczego osobna funkcja: statisticsToCsv odrzuca wiersz, gdy nie ma `delta`
+ * (czyli change lub Δsum). Czujniki mocy, prądu, napięcia i SOC mają
+ * state_class: measurement, więc HA NIE zwraca dla nich change ani sum —
+ * wyłącznie mean/min/max/state. Puszczenie ich przez statisticsToCsv dałoby
+ * plik z samym nagłówkiem. Tutaj wiersz zostaje, jeśli ma jakąkolwiek wartość.
+ *
+ * Kolejność kolumn jest stała i niezależna od kolejności w zapytaniu, żeby
+ * pliki z różnych pobrań dało się porównywać.
+ * ==========================================================================*/
+const CSV_TYPE_ORDER = ['mean', 'min', 'max', 'state', 'sum', 'change', 'last_reset'];
+
+function anyStatsToCsv(statisticsResult, types) {
+  const asked = Array.isArray(types) && types.length ? types : CSV_TYPE_ORDER;
+  const cols = CSV_TYPE_ORDER.filter((t) => asked.includes(t));
+  const lines = [['statistic_id', 'start', 'start_utc'].concat(cols).join(',')];
+
+  Object.keys(statisticsResult).forEach((statId) => {
+    const periods = statisticsResult[statId] || [];
+    periods.forEach((p) => {
+      const utcKey = toUtcKey(p.start);
+      if (!utcKey) return;
+
+      const vals = cols.map((t) => {
+        const v = p[t];
+        return (typeof v === 'number' && isFinite(v)) ? v : '';
+      });
+      // Pomiń tylko wiersze całkowicie puste — nie te bez `change`.
+      if (vals.every((v) => v === '')) return;
+
+      lines.push([statId, toWarsawString(p.start), utcKey].concat(vals).join(','));
+    });
+  });
+
+  return lines.join('\n') + '\n';
+}
+
+module.exports = { statisticsToCsv, anyStatsToCsv, toWarsawString, toUtcKey };

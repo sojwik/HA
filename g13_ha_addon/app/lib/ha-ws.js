@@ -40,11 +40,29 @@ function asValidDate(v) {
  * @param {Date|string|number} endDate
  * @returns {Promise<Object>} mapa statistic_id -> [{start, sum, change}]
  */
-function fetchStatistics(statisticIds, startDate, endDate) {
+/* Dozwolone typy statystyk HA. `change` i `sum` istnieją tylko dla liczników
+ * (state_class total / total_increasing). Czujniki chwilowe — moc, prąd,
+ * napięcie, SOC — mają wyłącznie mean/min/max/state. Dlatego typ musi dać
+ * się wybrać, inaczej eksport BMS wraca pusty. */
+const ALLOWED_STAT_TYPES = ['change', 'sum', 'mean', 'min', 'max', 'state', 'last_reset'];
+
+function fetchStatistics(statisticIds, startDate, endDate, types) {
   return new Promise((resolve, reject) => {
     // --- walidacja PRZED side-effectami (P0-3) ---
     if (!Array.isArray(statisticIds) || statisticIds.length === 0) {
       reject(new Error('fetchStatistics: lista statistic_ids jest pusta lub nie jest tablicą.'));
+      return;
+    }
+    // Domyślnie bez zmian: dotychczasowa ścieżka Growatt prosi o change+sum.
+    const reqTypes = types === undefined ? ['change', 'sum'] : types;
+    if (!Array.isArray(reqTypes) || reqTypes.length === 0) {
+      reject(new Error('fetchStatistics: types musi być niepustą tablicą.'));
+      return;
+    }
+    const badType = reqTypes.filter((t) => !ALLOWED_STAT_TYPES.includes(t));
+    if (badType.length) {
+      reject(new Error('fetchStatistics: niedozwolone typy statystyk: ' + badType.join(', ')
+        + '. Dozwolone: ' + ALLOWED_STAT_TYPES.join(', ')));
       return;
     }
     const bad = statisticIds.filter((id) => typeof id !== 'string' || !id.includes('.'));
@@ -117,7 +135,7 @@ function fetchStatistics(statisticIds, startDate, endDate) {
             end_time: end.toISOString(),
             statistic_ids: statisticIds,
             period: 'hour',
-            types: ['change', 'sum'],
+            types: reqTypes,
             // P1-10: jawnie prosimy o kWh. Bez tego HA zwraca jednostkę
             // statystyki, która po zmianie integracji może być Wh.
             units: { energy: 'kWh' },
@@ -141,4 +159,4 @@ function fetchStatistics(statisticIds, startDate, endDate) {
   });
 }
 
-module.exports = { fetchStatistics, asValidDate };
+module.exports = { fetchStatistics, asValidDate, ALLOWED_STAT_TYPES };

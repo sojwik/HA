@@ -2263,6 +2263,18 @@ async function saveState(){
   catch(e){ log('Nie udało się zapisać cache cen RCE: ' + e.message, 'error'); }
 }
 async function loadState(){
+  // F39: opcje dodatku muszą zasilić walidator frontendu. Wcześniej
+  // validateCfg powstawało raz z domyślnych wartości validate.js, więc
+  // battery_capacity_kwh i limits_kw ustawione w HA były ignorowane
+  // przy walidacji (backend ich używał, przeglądarka nie).
+  try{
+    const ac = await loadAddonConfig();
+    validateCfg = V.resolveConfig({
+      limitsKw: ac.limitsKw,
+      batteryCapacityKwh: ac.batteryCapacityKwh,
+      batteryEta: ac.batteryEta,
+    });
+  } catch(e){ /* brak backendu (plik otwarty lokalnie) — zostaje default */ }
   if (storageUsable()){
     try{
       const m = await window.storage.get('monthly-ledger');

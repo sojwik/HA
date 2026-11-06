@@ -140,6 +140,51 @@ function waitForServer(timeoutMs) {
     r.json && r.json.batteryCapacityKwh === Vcheck.resolveConfig().batteryCapacityKwh,
     'serwer: ' + (r.json && r.json.batteryCapacityKwh) + ', walidator: ' + Vcheck.resolveConfig().batteryCapacityKwh);
 
+  console.log('\n=== F38: aktualizacja dodatku musi dotrzeć do przeglądarki ===');
+  // Regresja z produkcji: no-cache był ustawiany TYLKO dla .html, więc po
+  // aktualizacji przeglądarka uruchamiała nowy index.html ze starym
+  // validate.js. Log pokazywał pojemność 16.35 kWh przy 14.34 w kodzie,
+  // a jednocześnie nowe ostrzeżenie F37 z index.html działało.
+  const idx = await req('GET', '/');
+  t('S32 index.html wskazuje validate.js z wersją (?v=…)',
+    idx.status === 200 && /<script src="validate\.js\?v=\d+"/.test(idx.text),
+    'status ' + idx.status + ', fragment: ' + (idx.text.match(/<script src="validate[^>]*>/) || ['brak'])[0]);
+  const vjs = await req('GET', '/validate.js');
+  t('S33 validate.js serwowany z Cache-Control: no-cache',
+    vjs.status === 200 && /no-cache/.test(vjs.headers.get('cache-control') || ''),
+    'cache-control: ' + vjs.headers.get('cache-control'));
+  const vend = await req('GET', '/vendor/xlsx.full.min.js');
+  t('S34 vendor/*.js też rewalidowany',
+    vend.status === 200 && /no-cache/.test(vend.headers.get('cache-control') || ''),
+    'cache-control: ' + vend.headers.get('cache-control'));
+  // Podmiana treści nie może uciąć pliku — index jest teraz czytany i wysyłany
+  // ręcznie, więc sprawdzamy, że ogon dokumentu dotarł w całości.
+  t('S35 serwowany index.html kompletny (nie ucięty)',
+    idx.text.includes('setupGrowattAutoRefresh') && /<\/html>\s*$/.test(idx.text),
+    'długość ' + idx.text.length + ', koniec: ' + JSON.stringify(idx.text.slice(-40)));
+
+  console.log('\n=== /api/ha/stats.csv: walidacja PRZED połączeniem z HA ===');
+  // Endpoint diagnostyczny (BMS). W tym teście nie ma SUPERVISOR_TOKEN, więc
+  // poprawne żądanie musi dostać 502 z HA, a NIE 500/wywrócenie procesu.
+  // Wszystko, co da się odrzucić lokalnie, musi być odrzucone jako 400.
+  const noEnt = await req('GET', '/api/ha/stats.csv');
+  t('S36 brak "entities" → 400 z instrukcją, nie zgadywanie',
+    noEnt.status === 400 && /entities/.test(noEnt.text), 'status ' + noEnt.status + ': ' + noEnt.text.slice(0, 120));
+  const badEnt = await req('GET', '/api/ha/stats.csv?entities=sensor ok;nazwa');
+  t('S37 nieprawidłowe entity_id → 400', badEnt.status === 400, 'status ' + badEnt.status);
+  const badTy = await req('GET', '/api/ha/stats.csv?entities=sensor.bms_current&types=median');
+  t('S38 niedozwolony typ statystyki → 400 z listą dozwolonych',
+    badTy.status === 400 && /mean/.test(badTy.text), 'status ' + badTy.status + ': ' + badTy.text.slice(0, 120));
+  const many = Array.from({ length: 41 }, (_, i) => 'sensor.x' + i).join(',');
+  const tooMany = await req('GET', '/api/ha/stats.csv?entities=' + many);
+  t('S39 powyżej 40 encji → 400', tooMany.status === 400, 'status ' + tooMany.status);
+  const badRange = await req('GET', '/api/ha/stats.csv?entities=sensor.bms_current&start=2026-10-01&end=2026-09-01');
+  t('S40 start >= end → 400', badRange.status === 400, 'status ' + badRange.status);
+  const badDate = await req('GET', '/api/ha/stats.csv?entities=sensor.bms_current&start=smiec');
+  t('S41 śmieciowa data → 400, proces żyje', badDate.status === 400, 'status ' + badDate.status);
+  const alive = await req('GET', '/api/health');
+  t('S42 proces przeżył całą serię błędnych żądań', alive.status === 200, 'status ' + alive.status);
+
   console.log('\n=== CSP musi dopuszczać hosta, którego używa frontend ===');
   // Regresja: CSP miało api.pse.pl, a frontend api.raporty.pse.pl. Przeglądarka
   // blokowała natychmiast, więc wszystkie 31 dni RCE padały w tej samej sekundzie.
