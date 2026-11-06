@@ -1,11 +1,12 @@
 name: "G13 Depozyt Prosumencki"
-version: "0.1.7"
+version: "0.2.0"
 slug: "g13_depozyt_calc"
-description: "Kalkulator depozytu prosumenckiego TAURON G13 z automatycznym pobieraniem danych Growatt z Home Assistant (bez ręcznego eksportu/importu plików)."
+description: "Kalkulator depozytu prosumenckiego TAURON G13 z automatycznym pobieraniem danych Growatt z Home Assistant i walidacją fizyczną pomiarów."
 arch:
   - amd64
   - aarch64
-  - armv7
+# armv7 usunięty: Supervisor wycofał wsparcie dla armhf/armv7/i386.
+# Deweloperzy dodatków powinni publikować obrazy tylko dla amd64/aarch64.
 init: false
 startup: application
 boot: auto
@@ -14,8 +15,9 @@ ingress_port: 8099
 panel_icon: mdi:solar-power
 panel_title: "G13 Depozyt"
 homeassistant_api: true
-map:
-  - data:rw
+# `map: - data:rw` usunięte: /data jest zawsze dostępne dla dodatku
+# i nie potrzebuje deklaracji map. Było no-opem.
+timeout: 30
 options:
   growatt_entities:
     - "sensor.growatt_solar_energy_total"
@@ -26,8 +28,38 @@ options:
     - "sensor.growatt_battery_battery_discharge_total"
   history_months_back: 24
   refresh_interval_minutes: 60
+  # Progi fizyczne w kW. Wartości domyślne pod Growatt WIT 12K-HU
+  # (13,2 kW max moc pozorna, bateria 250 A @ 40–60 V) i moc umowną 16 kW.
+  # Zmień, jeśli masz inny falownik lub przyłącze — inaczej filtr będzie
+  # odrzucał legalne godziny albo przepuszczał błędne.
+  limits_kw:
+    produkcja: 13.2
+    oddanieHa: 13.2
+    poborHa: 16.0
+    zuzycieDomu: 29.2
+    ladowanie: 14.6
+    rozladowanie: 14.6
+  # Pojemność paczki: 16S LiFePO4 280 Ah.
+  # 3,20 V/ogniwo → 14,34 kWh (nominalna)
+  # 3,45 V/ogniwo → 15,46 kWh (przy ładowaniu)
+  # 3,65 V/ogniwo → 16,35 kWh (szczyt) — użyta jako górna granica w teście SOC
+  battery_capacity_kwh: 16.35
+  battery_eta: 0.92
+  # Włącz, jeśli port 8099 jest wystawiony poza ingress.
+  # Wymaga ustawienia zmiennej środowiskowej ADDON_TOKEN.
+  require_auth: false
 schema:
   growatt_entities:
     - "str"
   history_months_back: "int(1,120)"
   refresh_interval_minutes: "int(5,1440)"
+  limits_kw:
+    produkcja: "float(0.1,100)"
+    oddanieHa: "float(0.1,100)"
+    poborHa: "float(0.1,200)"
+    zuzycieDomu: "float(0.1,300)"
+    ladowanie: "float(0.1,100)"
+    rozladowanie: "float(0.1,100)"
+  battery_capacity_kwh: "float(0.1,500)"
+  battery_eta: "float(0.5,1)"
+  require_auth: "bool"
