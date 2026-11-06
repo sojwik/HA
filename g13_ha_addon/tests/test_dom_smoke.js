@@ -122,8 +122,8 @@ function serveDir(dir) {
   // Strona SAMA definiuje window.storage (shim na fetch do api/kv), więc
   // podstawienie window.storage w beforeParse nie działa — zostanie nadpisane.
   // Podmieniamy fetch, czyli warstwę, z której ten shim faktycznie korzysta.
-  async function loadWithCache(cacheValue) {
-    const kv = { 'rce-cache': cacheValue };
+  async function loadWithCache(cacheValue, extraKv) {
+    const kv = Object.assign({ 'rce-cache': cacheValue }, extraKv || {});
     const dom2 = await JSDOM.fromURL(`http://127.0.0.1:${port}/index.html`, {
       runScripts: 'dangerously',
       resources: 'usable',
@@ -132,6 +132,12 @@ function serveDir(dir) {
         window.XLSX = { read: () => ({ SheetNames: ['a'], Sheets: { a: {} } }), utils: { sheet_to_json: () => [] } };
         window.fetch = (url, opts) => {
           const u = String(url);
+          const lm = u.match(/api\/kv\?prefix=(.*)$/);
+          if (lm) {
+            const pre = decodeURIComponent(lm[1]);
+            const keys = Object.keys(kv).filter(k => k.startsWith(pre));
+            return Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ keys }) });
+          }
           const m = u.match(/api\/kv\/(.+)$/);
           if (m) {
             const key = decodeURIComponent(m[1]);
@@ -178,6 +184,36 @@ function serveDir(dir) {
     !bodyNew.includes('starym formacie'),
     'wersjonowany cache nie powinien być odrzucany');
   dNew.window.close();
+
+  console.log('\n=== Godziny eLicznika muszą przetrwać restart ===');
+  // Bez utrwalania hourlyElicznik po restarcie nie dało się pobrać cen RCE
+  // („Najpierw wczytaj dane z eLicznika") ani przeliczyć depozytu.
+  const julyHours = {};
+  for (let h = 0; h < 24; h++) {
+    const key = '2026-07-01_' + String(h).padStart(2, '0');
+    julyHours[key] = { date: '2026-07-01', hour: h, oddaniePoZbil: 1.5, poborPoZbil: 0.2, strefa: 'pozostałe' };
+  }
+  const extra = { 'elicznik-hourly-2026-07': JSON.stringify(julyHours) };
+
+  // Brak cen RCE: godziny wczytane, ale depozyt NIE może być po cichu wyzerowany.
+  const dNoPrice = await loadWithCache(JSON.stringify({ v: 2, data: {} }), extra);
+  const logNoPrice = dNoPrice.window.document.getElementById('logOutput').textContent;
+  t('D17 godziny eLicznika wczytane po restarcie',
+    logNoPrice.includes('godzin eLicznika z poprzedniej sesji'),
+    'oczekiwano komunikatu o wczytaniu godzin');
+  t('D18 brak cen RCE zgłoszony, nie ciche zerowanie',
+    logNoPrice.includes('brak cen RCE'),
+    'oczekiwano ostrzeżenia o brakujących cenach');
+  dNoPrice.window.close();
+
+  // Z cenami: miesiące muszą zostać przeliczone.
+  const prices = {};
+  for (let h = 0; h < 24; h++) prices['2026-07-01_' + String(h).padStart(2, '0')] = 400;
+  const dWithPrice = await loadWithCache(JSON.stringify({ v: 2, data: prices }), extra);
+  const logWithPrice = dWithPrice.window.document.getElementById('logOutput').textContent;
+  t('D19 z cenami nie ma ostrzeżenia o braku cen',
+    logWithPrice.includes('godzin eLicznika z poprzedniej sesji') && !logWithPrice.includes('brak cen RCE'));
+  dWithPrice.window.close();
 
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
