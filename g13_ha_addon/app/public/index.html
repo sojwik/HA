@@ -854,6 +854,7 @@ async function handleElicznikFiles(fileList){
   }
   updateElicznikStatus();
   recomputeMonths();
+  await saveElicznikHourly();
   await saveState();
 }
 
@@ -2118,6 +2119,45 @@ function storageUsable(){
   if (!storageAvailable) log('Zapis między sesjami niedostępny w tym środowisku (brak window.storage) — dane przetrwają tylko bieżącą sesję, nie zniknie nic w jej trakcie.', 'warn');
   return storageAvailable;
 }
+/* Godziny eLicznika muszą przetrwać restart: bez nich fetchRceFromApi() nie ma
+ * listy dni, a recomputeMonths() nie ma czego wyceniać. Zapis per miesiąc,
+ * żeby pojedynczy PUT był mały (~108 KB) niezależnie od liczby miesięcy. */
+async function saveElicznikHourly(){
+  if (!storageUsable()) return;
+  const byMonth = {};
+  for (const key in state.hourlyElicznik){
+    const row = state.hourlyElicznik[key];
+    if (!row || !row.date) continue;
+    const mk = row.date.slice(0,7);
+    if (!byMonth[mk]) byMonth[mk] = {};
+    byMonth[mk][key] = row;
+  }
+  for (const mk in byMonth){
+    try{ await window.storage.set('elicznik-hourly-' + mk, JSON.stringify(byMonth[mk])); }
+    catch(e){ log('Nie udało się zapisać godzin eLicznika za ' + mk + ': ' + e.message, 'error'); }
+  }
+}
+
+async function loadElicznikHourly(){
+  if (!storageUsable()) return 0;
+  let hours = 0;
+  try{
+    const l = await window.storage.list('elicznik-hourly-');
+    const keys = (l && l.keys) || [];
+    for (const k of keys){
+      try{
+        const r = await window.storage.get(k);
+        if (!r || !r.value) continue;
+        const obj = JSON.parse(r.value);
+        for (const hk in obj){
+          if (obj[hk] && obj[hk].date){ state.hourlyElicznik[hk] = obj[hk]; hours++; }
+        }
+      } catch(e){ log('Uszkodzony zapis godzin eLicznika (' + k + '): ' + e.message, 'warn'); }
+    }
+  } catch(e){ log('Nie udało się wczytać godzin eLicznika: ' + e.message, 'warn'); }
+  return hours;
+}
+
 async function saveState(){
   if (!storageUsable()) return;
   try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates})); }
@@ -2167,6 +2207,18 @@ async function loadState(){
         }
       }
     } catch(e){ /* brak cache — pierwsze uruchomienie */ }
+    const restoredHours = await loadElicznikHourly();
+    if (restoredHours > 0){
+      log('Wczytano ' + restoredHours + ' godzin eLicznika z poprzedniej sesji.', 'info');
+      // Przeliczamy tylko, gdy mamy ceny. Bez cen recomputeMonths() wyzerowałby
+      // przypis, sugerując brak depozytu zamiast brakujących danych.
+      if (Object.keys(state.rceHourly).length > 0){
+        recomputeMonths();
+      } else {
+        log('Godziny eLicznika są wczytane, ale brak cen RCE — pobierz ceny, żeby przeliczyć depozyt.', 'warn');
+      }
+      updateElicznikStatus();
+    }
   }
   const kiInput = document.getElementById('inputKosztInwestycji');
   if (kiInput && state.kosztInwestycji) kiInput.value = state.kosztInwestycji;
@@ -2264,6 +2316,12 @@ document.getElementById('btnReset').addEventListener('click', async function(e){
   if (storageUsable()){
     try{ await window.storage.delete('monthly-ledger'); } catch(err){}
     try{ await window.storage.delete('rce-cache'); } catch(err){}
+    try{
+      const l = await window.storage.list('elicznik-hourly-');
+      for (const k of ((l && l.keys) || [])){
+        try{ await window.storage.delete(k); } catch(err){}
+      }
+    } catch(err){}
   }
   updateElicznikStatus(); updateRceStatus();
   render();
