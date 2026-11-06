@@ -1,0 +1,8 @@
+node_modules/
+*.log
+/data/
+kv-store.json*
+
+# Prywatny eksport HA — nigdy nie commitować (profil zużycia energii)
+tests/fixtures/
+*.corrupt-*
