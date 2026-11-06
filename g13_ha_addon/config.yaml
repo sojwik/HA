@@ -1,5 +1,5 @@
 name: "G13 Depozyt Prosumencki"
-version: "0.3.0"
+version: "0.3.1"
 slug: "g13_depozyt_calc"
 description: "Kalkulator depozytu prosumenckiego TAURON G13 z automatycznym pobieraniem danych Growatt z Home Assistant i walidacją fizyczną pomiarów."
 arch:
@@ -55,10 +55,12 @@ options:
   battery_capacity_kwh: 14.34
   battery_eta: 0.92
   # Sprawność po stronie DC — używana, gdy kanały baterii liczone są z BMS.
-  # Zmierzone na 46 zdrowych dobach: DC 0,9335 vs AC 0,9151 (różnica to
-  # strata falownika). Nie ustawiaj tu tej samej wartości co battery_eta,
-  # bo poprawne miesiące z BMS będą oznaczane jako niemożliwe.
-  battery_eta_dc: 0.94
+  # Zmierzone na 5 miesiącach z pełnym pokryciem obu źródeł (kwiecień–sierpień):
+  # DC 0,9702 vs AC 0,9253. Różnica 4,9% to strata falownika.
+  # Nie ustawiaj tu tej samej wartości co battery_eta — poprawne miesiące
+  # z BMS będą oznaczane jako niemożliwe. W 0.3.0 było tu błędnie 0,94
+  # (wyznaczone z niereprezentatywnej próbki 46 dób) i psuło to 7 miesięcy.
+  battery_eta_dc: 0.97
   # Włącz, jeśli port 8099 jest wystawiony poza ingress.
   # Wymaga ustawienia zmiennej środowiskowej ADDON_TOKEN.
   require_auth: false

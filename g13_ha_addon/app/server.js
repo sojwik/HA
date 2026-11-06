@@ -50,7 +50,7 @@ const DEFAULT_OPTIONS = {
   },
   battery_capacity_kwh: 14.34,   // 16S 280 Ah @ 3,2 V nominalnie; musi zgadzać się z validate.js
   battery_eta: 0.92,
-  battery_eta_dc: 0.94,   // BMS mierzy przed falownikiem — patrz validate.js
+  battery_eta_dc: 0.97,   // BMS mierzy przed falownikiem — patrz validate.js
   require_auth: false,
 };
 

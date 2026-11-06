@@ -1394,9 +1394,12 @@ function parseHaStatisticsCsv(rows, sourceLabel){
       accepted++;
       if (!monthly[mk]) monthly[mk] = {produkcja:0, oddanieHa:0, poborHa:0, zuzycieDomu:0, ladowanie:0, rozladowanie:0, bmsLadowanie:0, bmsRozladowanie:0};
       monthly[mk][role] += list[i].delta;
-      const cov = (covByMonth[mk] = covByMonth[mk] || {g:new Set(), b:new Set()});
+      const cov = (covByMonth[mk] = covByMonth[mk] || {g:new Set(), b:new Set(), pv:new Set()});
       if (role === 'ladowanie' || role === 'rozladowanie') cov.g.add(list[i].ts);
       if (role === 'bmsLadowanie' || role === 'bmsRozladowanie') cov.b.add(list[i].ts);
+      // F48: godziny z REALNYM pomiarem produkcji. Bez tego estimateGridCharge
+      // brał brak danych PV za noc i przypisywał całe ładowanie do sieci.
+      if (role === 'produkcja') cov.pv.add(list[i].ts);
       if (roleToHourField[role]){
         if (!hourlyByMonth[mk]) hourlyByMonth[mk] = {};
         const h = (hourlyByMonth[mk][list[i].ts] = hourlyByMonth[mk][list[i].ts]
@@ -1437,9 +1440,11 @@ function parseHaStatisticsCsv(rows, sourceLabel){
   //    z sieci (estimateGridCharge). Podmiana samych sum dałaby miesiąc
   //    „naprawiony” w tabeli, a nadal niemożliwy w teście.
   const bmsReport = {};
+  const pvHours = {};
   for (const mk in monthly){
     const m = monthly[mk];
-    const cov = covByMonth[mk] || {g:new Set(), b:new Set()};
+    const cov = covByMonth[mk] || {g:new Set(), b:new Set(), pv:new Set()};
+    pvHours[mk] = cov.pv.size;
     const dec = V.reconcileBatteryMonth(
       {charge:m.ladowanie, discharge:m.rozladowanie, hours:cov.g.size},
       {charge:m.bmsLadowanie, discharge:m.bmsRozladowanie, hours:cov.b.size},
@@ -1478,7 +1483,7 @@ function parseHaStatisticsCsv(rows, sourceLabel){
       log('Kontrola krzyżowa ' + formatMonthLabel(mk) + ': ' + dec.reason, 'warn');
     }
   }
-  return {monthly:monthly, hourly:hourly, rejected:summary, bms:bmsReport};
+  return {monthly:monthly, hourly:hourly, rejected:summary, bms:bmsReport, pvHours:pvHours};
 }
 
 /* Szacunek energii kupionej z sieci do naładowania baterii.
@@ -1497,7 +1502,11 @@ function parseHaStatisticsCsv(rows, sourceLabel){
  */
 function estimateGridCharge(monthKey){
   const hours = state.haHourly[monthKey];
-  if (!hours || !hours.length) return {kwh:0, hours:0, estimated:false, nightKwh:0, dayKwh:0};
+  const m = state.months[monthKey] || {};
+  if (!hours || !hours.length){
+    return {kwh:0, hours:0, estimated:false, nightKwh:0, dayKwh:0,
+            pvHours:0, pvCoverage:null, reliable:true};
+  }
   let kwh = 0, n = 0, night = 0, day = 0;
   for (const h of hours){
     if (h.produkcja <= 0.01 && h.ladowanie > 0.05){
@@ -1507,7 +1516,22 @@ function estimateGridCharge(monthKey){
       else day += h.ladowanie;
     }
   }
-  return {kwh:round2(kwh), hours:n, estimated:true, nightKwh:round2(night), dayKwh:round2(day)};
+  /* F48: metoda zakłada, że zerowa produkcja oznacza NOC. Jeśli danych PV
+   * w ogóle nie ma, zero oznacza BRAK POMIARU — i wtedy całe ładowanie
+   * zostaje błędnie przypisane do sieci. Realny marzec 2026: BMS ma ~350 h,
+   * Growatt tylko 4 h, więc 148,1 ze 152,7 kWh poszło „z sieci” i wygenerowało
+   * −93,32 zł kosztu znikąd. Bez danych PV szacunek jest NIEZNANY, nie zerowy
+   * i nie pełny — trzeba to pokazać, a nie udawać pomiar. */
+  const pvHours = (typeof m.haPvHours === 'number') ? m.haPvHours : null;
+  const denom = hours.length;
+  const pvCoverage = (pvHours !== null && denom > 0) ? pvHours / denom : null;
+  // Brak informacji o pokryciu (stan sprzed 0.3.1) → nie blokujemy, ale
+  // też nie udajemy pewności: estimated zostaje, reliable też, bo nie mamy
+  // podstaw do alarmu. Miesiąc bez ładowania nie potrzebuje danych PV.
+  const needsPv = (m.haLadowanie || 0) > 0.5;
+  const reliable = !needsPv || pvCoverage === null || pvCoverage >= 0.90;
+  return {kwh:round2(kwh), hours:n, estimated:true, nightKwh:round2(night), dayKwh:round2(day),
+          pvHours:pvHours, pvCoverage:pvCoverage, reliable:reliable};
 }
 
 /* Panel odrzuceń — odrzucone godziny muszą być widoczne, nie ciche. */
@@ -1623,6 +1647,9 @@ async function handleHaStatsFiles(fileList){
         // miesiąca. Nagłówek sumował to 9 razy (192 h -> 1728 h).
         state.haRejected[mk] = rejByMonth[mk] || {total:0, rejectedKwh:0, byRole:{}};
         if (parsed.bms && parsed.bms[mk]) state.bmsCheck[mk] = parsed.bms[mk];
+        // F48: trwałe, bo haHourly NIE jest zapisywane w KV — po restarcie
+        // strażnik musiałby uznać każdy miesiąc za pozbawiony danych PV.
+        if (parsed.pvHours) m.haPvHours = parsed.pvHours[mk] || 0;
         if (parsed.hourly[mk]){
           state.haHourly[mk] = parsed.hourly[mk];
           // F32: pokrycie godzinowe, żeby nie traktować niepełnego miesiąca
@@ -2098,6 +2125,7 @@ function renderRealBattery(){
   // Wcześniej wchodziły, a tylko wiersz był oznaczony na czerwono.
   let trustedValue=0, trustedHours=0, trustedMonths=0;
   let flaggedValue=0, flaggedMonths=0;
+  let noPvMonths=0; const noPvList=[];
   tbody.innerHTML = keys.map(function(k){
     const m = state.months[k];
     const rate = resolveEffectiveRate(k);
@@ -2106,12 +2134,13 @@ function renderRealBattery(){
     // Od września bateria jest ładowana z sieci (sierpień: dokładnie 0 kWh),
     // więc zawyżenie trzeba odjąć po cenie ZAKUPU, nie po cenie depozytu.
     const grid = estimateGridCharge(k);
-    const gridCost = (rate !== null && grid.kwh > 0) ? grid.kwh * rate : 0;
-    const gross = rate !== null ? m.haRozladowanie * rate : null;
-    const value = gross !== null ? gross - gridCost : null;
     const bc = state.haBatteryCheck[k];
+    // F48: bez danych PV nie da się policzyć kosztu ładowania, więc nie da
+    // się też policzyć zysku. Wartość NULL, nie zero i nie całe rozładowanie.
+    const value = (rate === null || !grid.reliable) ? null : m.haRozladowanie * rate - grid.kwh * rate;
+    const gridCost = (rate !== null && grid.reliable && grid.kwh > 0) ? grid.kwh * rate : 0;
     sumCharge += m.haLadowanie; sumDischarge += m.haRozladowanie;
-    sumGridKwh += grid.kwh; sumGridCost += gridCost;
+    if (grid.reliable){ sumGridKwh += grid.kwh; sumGridCost += gridCost; }
     if (value !== null){
       sumValue += value; monthsWithValue++;
       if (bc && !bc.plausible){
@@ -2120,16 +2149,27 @@ function renderRealBattery(){
         trustedValue += value; trustedMonths++;
         trustedHours += (m.haHours || (state.haHourly[k] ? state.haHourly[k].length : 0));
       }
+    } else if (!grid.reliable){
+      // Luka danych istnieje niezależnie od tego, czy mamy cenę. Bez tego
+      // warunku objaśnienie znikało dokładnie wtedy, gdy miesiąc był
+      // najmniej kompletny (brak RCE ORAZ brak PV).
+      noPvMonths++;
+      noPvList.push(formatMonthLabel(k) + ' (' + (grid.pvHours || 0) + ' z '
+        + (m.haHours || (state.haHourly[k] ? state.haHourly[k].length : 0)) + ' h)');
     }
     const warn = (bc && !bc.plausible)
       ? ' <span class="tag-warn" style="background:#7f1d1d;color:#fff;" title="' + V.escapeHtml(bc.reason || '') + '">bilans niemożliwy</span>'
-      : '';
+      : (!grid.reliable
+        ? ' <span class="tag-warn" title="Za mało godzin z pomiarem produkcji, żeby oszacować ładowanie z sieci">brak danych PV</span>'
+        : '');
     return '<tr>' +
       '<td class="col-month">' + V.escapeHtml(formatMonthLabel(k)) + warn + '</td>' +
       '<td class="num">' + formatKwh1(m.haLadowanie) + '</td>' +
       '<td class="num">' + formatKwh1(m.haRozladowanie) + '</td>' +
-      '<td class="num">' + formatKwh1(grid.kwh) + (grid.estimated ? ' <span class="tag-warn" title="Szacunek: ładowanie przy zerowej produkcji AC">szac.</span>' : '') + '</td>' +
-      '<td class="num accent-rust">' + (rate === null ? '—' : formatPLN(-gridCost)) + '</td>' +
+      '<td class="num">' + (grid.reliable
+        ? formatKwh1(grid.kwh) + (grid.estimated ? ' <span class="tag-warn" title="Szacunek: ładowanie przy zerowej produkcji AC">szac.</span>' : '')
+        : '<span class="tag-warn" title="Brak pomiaru produkcji w tym miesiącu — szacunek byłby fikcją">—</span>') + '</td>' +
+      '<td class="num accent-rust">' + ((rate === null || !grid.reliable) ? '—' : formatPLN(-gridCost)) + '</td>' +
       '<td class="num accent-strong">' + (value === null ? '—' : formatPLN(value)) + '</td>' +
     '</tr>';
   }).join('');
@@ -2144,6 +2184,15 @@ function renderRealBattery(){
   const noteEl = document.getElementById('realBatteryNote');
   if (noteEl){
     const parts = [];
+    if (noPvMonths > 0){
+      parts.push('<p class="hint" style="margin:.5rem 0;padding:.5rem .7rem;'
+        + 'background:#78350f22;border-left:3px solid #b45309;">'
+        + '<strong>' + noPvMonths + ' mies. pominięto w zysku: brak pomiaru produkcji.</strong> '
+        + V.escapeHtml(noPvList.join(', ')) + '. '
+        + 'Bez danych PV nie da się odróżnić ładowania z sieci od ładowania nadwyżką PV, '
+        + 'więc koszt zakupu jest nieznany — a zysk nie do policzenia. '
+        + 'To nie jest zero: te miesiące po prostu nie wchodzą do nagłówka.</p>');
+    }
     if (flaggedMonths > 0){
       parts.push('<p class="hint" style="margin:.5rem 0;padding:.5rem .7rem;'
         + 'background:#7f1d1d22;border-left:3px solid #b91c1c;">'
@@ -2835,7 +2884,12 @@ async function exportEntitiesCsv(){
   qs.set('entities', entities.join(','));
   if (start) qs.set('start', start);
   if (end) qs.set('end', end);
-  qs.set('types', 'mean,min,max');
+  // F49: było 'mean,min,max' — dobre dla czujników chwilowych (moc, prąd,
+  // napięcie), bezużyteczne dla LICZNIKÓW energii. Licznik ma change/sum;
+  // mean z licznika to średnia wartość narastająca, nie energia godzinowa.
+  // Prosimy o wszystkie typy: serializator pomija kolumny bez wartości,
+  // więc jedne i drugie encje dostają to, co dla nich istnieje.
+  qs.set('types', 'mean,min,max,change,sum');
   say('Pobieram ' + entities.length + ' encji z Home Assistant…', 'info');
   try{
     const r = await fetch('api/ha/stats.csv?' + qs.toString());
