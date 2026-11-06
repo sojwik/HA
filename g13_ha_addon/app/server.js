@@ -19,7 +19,7 @@ const fs = require('fs');
 const express = require('express');
 const kv = require('./lib/kv');
 const haWs = require('./lib/ha-ws');
-const { statisticsToCsv } = require('./lib/growatt-csv');
+const { statisticsToCsv, anyStatsToCsv } = require('./lib/growatt-csv');
 const V = require('./lib/validate');
 
 const PORT = process.env.PORT || 8099;
@@ -214,6 +214,80 @@ app.get('/api/growatt/ha-stats.csv', async (req, res) => {
     res.send(statisticsToCsv(result));
   } catch (err) {
     console.error('[growatt] Błąd pobierania statystyk z HA:', err.message);
+    res.status(502).json({ error: err.message });
+  }
+});
+
+/* ---------- eksport DOWOLNYCH encji (diagnostyka, np. JK-BMS) ----------
+ * Powód: do rozstrzygnięcia, czy nadmiar rozładowania jest po stronie
+ * falownika, potrzebny jest niezależny pomiar z BMS (prąd i napięcie po
+ * stronie DC). Encje BMS to czujniki chwilowe, więc mają mean/min/max,
+ * a nie change/sum — dlatego osobny endpoint i osobny serializator.
+ *
+ *   /api/ha/stats.csv?entities=sensor.bms_current,sensor.bms_total_voltage
+ *                    &start=2026-09-20&end=2026-10-16&types=mean,min,max
+ *
+ * Bez parametrów `entities` endpoint nie zgaduje — zwraca 400 z instrukcją.
+ * -------------------------------------------------------------------- */
+app.get('/api/ha/stats.csv', async (req, res) => {
+  const raw = typeof req.query.entities === 'string' ? req.query.entities : '';
+  const entities = raw.split(',').map((s) => s.trim()).filter(Boolean);
+  if (!entities.length) {
+    res.status(400).json({
+      error: 'Podaj "entities" jako listę entity_id po przecinku, np. '
+        + '?entities=sensor.jkbms_current,sensor.jkbms_total_voltage&start=2026-09-20&end=2026-10-16',
+    });
+    return;
+  }
+  if (entities.length > 40) {
+    res.status(400).json({ error: 'Maksymalnie 40 encji na jedno żądanie (żądano ' + entities.length + ').' });
+    return;
+  }
+  const badId = entities.filter((id) => !/^[a-z_]+\.[a-z0-9_]+$/.test(id));
+  if (badId.length) {
+    res.status(400).json({ error: 'Nieprawidłowe entity_id: ' + badId.join(', ') });
+    return;
+  }
+
+  const types = (typeof req.query.types === 'string' && req.query.types.trim())
+    ? req.query.types.split(',').map((s) => s.trim()).filter(Boolean)
+    : ['mean', 'min', 'max', 'state'];
+  const badType = types.filter((t) => !haWs.ALLOWED_STAT_TYPES.includes(t));
+  if (badType.length) {
+    res.status(400).json({
+      error: 'Niedozwolone "types": ' + badType.join(', ')
+        + '. Dozwolone: ' + haWs.ALLOWED_STAT_TYPES.join(', '),
+    });
+    return;
+  }
+
+  const start = req.query.start ? haWs.asValidDate(req.query.start) : monthsAgo(options.history_months_back);
+  const end = req.query.end ? haWs.asValidDate(req.query.end) : new Date();
+  if (!start) { res.status(400).json({ error: 'Nieprawidłowy parametr "start": ' + req.query.start }); return; }
+  if (!end) { res.status(400).json({ error: 'Nieprawidłowy parametr "end": ' + req.query.end }); return; }
+  if (start >= end) { res.status(400).json({ error: '"start" musi być wcześniejsze niż "end".' }); return; }
+  const spanDays = (end - start) / 86400000;
+  if (spanDays > 366 * 5) {
+    res.status(400).json({ error: 'Zakres nie może przekraczać 5 lat (żądano ' + Math.round(spanDays) + ' dni).' });
+    return;
+  }
+
+  try {
+    const result = await haWs.fetchStatistics(entities, start, end, types);
+    const counts = entities.map((id) => [id, (result[id] || []).length]);
+    const empty = counts.filter(([, n]) => n === 0).map(([id]) => id);
+    console.log(`[ha-stats] typy=${types.join('+')} okresów: ${counts.map(([id, n]) => id + '=' + n).join(', ')}`);
+    if (empty.length) {
+      console.warn('[ha-stats] UWAGA: brak statystyk dla: ' + empty.join(', ')
+        + ' — encja musi mieć state_class (measurement/total/total_increasing), '
+        + 'inaczej HA nie tworzy dla niej statystyk. Sprawdź Narzędzia deweloperskie → Stany.');
+    }
+    res.set('Content-Type', 'text/csv; charset=utf-8');
+    res.set('Cache-Control', 'no-store');
+    res.set('Content-Disposition', 'attachment; filename="ha-stats.csv"');
+    res.send(anyStatsToCsv(result, types));
+  } catch (err) {
+    console.error('[ha-stats] Błąd pobierania statystyk z HA:', err.message);
     res.status(502).json({ error: err.message });
   }
 });

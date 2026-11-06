@@ -6,9 +6,23 @@ const os = require('os');
 const assert = require('assert');
 
 let pass = 0, fail = 0;
+/* t() musiało nauczyć się Promise'ów. Wcześniej wołało fn() bez await,
+ * więc testy `async` (H3–H6) zgłaszały sukces NIEZALEŻNIE od wyniku —
+ * odrzucony Promise był niezauważony. Teraz wynik jest awaitowany przed
+ * podsumowaniem i przed process.exit(). */
+const pending = [];
 function t(name, fn) {
-  try { fn(); console.log('  ✓ ' + name); pass++; }
-  catch (e) { console.log('  ✗ ' + name + '\n      ' + e.message); fail++; }
+  let r;
+  try { r = fn(); }
+  catch (e) { console.log('  ✗ ' + name + '\n      ' + e.message); fail++; return; }
+  if (r && typeof r.then === 'function') {
+    pending.push(r.then(
+      () => { console.log('  ✓ ' + name); pass++; },
+      (e) => { console.log('  ✗ ' + name + '\n      ' + (e && e.message ? e.message : e)); fail++; }
+    ));
+    return;
+  }
+  console.log('  ✓ ' + name); pass++;
 }
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'g13kv-'));
@@ -168,9 +182,71 @@ t('G5 nieparsowalny timestamp pominięty, nie wyzerowany', () => {
   assert.strictEqual(csv.trim().split('\n').length, 1, 'tylko nagłówek');
 });
 
+console.log('\n=== anyStatsToCsv: eksport czujników chwilowych (JK-BMS) ===');
+const { anyStatsToCsv } = require('../app/lib/growatt-csv');
+const BMS_TS = Date.parse('2026-09-28T02:00:00+02:00');
+// Encje BMS mają state_class: measurement, więc HA zwraca mean/min/max,
+// a NIE change/sum. To jest cały powód, dla którego powstał ten eksport.
+const BMS = { 'sensor.jkbms_current': [{ start: BMS_TS, mean: 5.4, min: 5.1, max: 5.9 }] };
+
+t('G7 czujnik chwilowy (mean/min/max, bez change/sum) NIE jest odrzucany', () => {
+  const csv = anyStatsToCsv(BMS, ['mean', 'min', 'max']);
+  const rows = csv.trim().split('\n');
+  assert.strictEqual(rows.length, 2, 'oczekiwano nagłówka + 1 wiersza, jest:\n' + csv);
+  assert.strictEqual(rows[0], 'statistic_id,start,start_utc,mean,min,max');
+  assert.ok(rows[1].includes('5.4,5.1,5.9'), rows[1]);
+});
+
+t('G8 statisticsToCsv ODRZUCA ten sam wiersz — dlatego potrzebny jest osobny eksport', () => {
+  const csv = statisticsToCsv(BMS);
+  assert.strictEqual(csv.trim().split('\n').length, 1, 'stary serializator powinien dać sam nagłówek');
+});
+
+t('G9 kolejność kolumn stała, niezależna od kolejności w "types"', () => {
+  const a = anyStatsToCsv(BMS, ['max', 'mean', 'min']);
+  const b = anyStatsToCsv(BMS, ['min', 'max', 'mean']);
+  assert.strictEqual(a, b);
+  assert.strictEqual(a.split('\n')[0], 'statistic_id,start,start_utc,mean,min,max');
+});
+
+t('G10 wiersz całkowicie pusty odpada, ale stan (state) wystarcza', () => {
+  const csv = anyStatsToCsv({
+    'sensor.x': [
+      { start: BMS_TS },
+      { start: BMS_TS + 3600000, state: 87 },
+    ],
+  }, ['mean', 'state']);
+  const rows = csv.trim().split('\n');
+  assert.strictEqual(rows.length, 2, csv);
+  assert.ok(rows[1].endsWith(',87'), rows[1]);
+});
+
+t('G11 DST: dwie godziny 02:00 mają różne klucze UTC także w nowym eksporcie', () => {
+  const csv = anyStatsToCsv({
+    'sensor.x': [
+      { start: Date.parse('2026-10-25T02:00:00+02:00'), mean: 1 },
+      { start: Date.parse('2026-10-25T02:00:00+01:00'), mean: 2 },
+    ],
+  }, ['mean']);
+  const rows = csv.trim().split('\n').slice(1);
+  assert.strictEqual(rows.length, 2);
+  assert.notStrictEqual(rows[0].split(',')[2], rows[1].split(',')[2]);
+});
+
+t('G12 fetchStatistics odrzuca niedozwolony typ statystyki', async () => {
+  const haWs = require('../app/lib/ha-ws');
+  let err = null;
+  try { await haWs.fetchStatistics(['sensor.x'], new Date(0), new Date(1000), ['mean', 'median']); }
+  catch (e) { err = e; }
+  assert.ok(err, 'brak błędu dla typu "median"');
+  assert.ok(/niedozwolone typy/i.test(err.message), err.message);
+});
+
 // sprzątanie
 fs.rmSync(TMP, { recursive: true, force: true });
 
-console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
-module.exports = { pass, fail };
-if (require.main === module) process.exit(fail ? 1 : 0);
+Promise.all(pending).then(() => {
+  console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
+  module.exports = { pass, fail };
+  if (require.main === module) process.exit(fail ? 1 : 0);
+});
