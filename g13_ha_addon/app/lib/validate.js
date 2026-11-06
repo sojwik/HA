@@ -31,11 +31,14 @@
       oddanieHa:    13.2,
       poborHa:      16.0,  // moc umowna przyłącza
       zuzycieDomu:  29.2,  // moc umowna + AC falownika
-      ladowanie:    14.6,  // 250 A × 58,4 V (16S @ 3,65 V)
+      ladowanie:    14.6,  // 250 A × 58,4 V (16S @ 3,65 V szczyt) — moc, nie energia
       rozladowanie: 14.6,
     },
     margin: 1.10,          // 10% na zaokrąglenia i przesunięcie próbkowania
-    batteryCapacityKwh: 16.35,
+    // 16S LiFePO4 280 Ah przy napięciu NOMINALNYM 3,2 V/ogniwo = 14,34 kWh.
+    // Wcześniej 16,35 kWh, czyli 3,65 V — to napięcie SZCZYTOWE ładowania,
+    // nie nominalne, i zawyżało pojemność o 14%.
+    batteryCapacityKwh: 14.34,
     batteryEta: 0.92,
     maxGapHours: 24,       // dłuższa luka → nie ufamy delcie jako jednemu oknu
   };
@@ -172,8 +175,15 @@
 
     const range = hi - lo;
     const cap = c.batteryCapacityKwh;
-    // 2% tolerancji na przesunięcie próbkowania liczników
-    const plausible = range <= cap * 1.02;
+    // Tolerancja 20%, nie 2%. Liczniki mierzą energię na ZACISKACH baterii,
+    // a nie przy napięciu nominalnym:
+    //   - ładowanie idzie przy ~3,35 V/ogniwo (+5% wobec 3,2 V),
+    //   - ogniwa 280 Ah nowe często mają realnie 290-300 Ah (+3-7%),
+    //   - dryf próbkowania liczników narasta przez ~730 h miesiąca.
+    // Przy 2% zdrowe miesiące (lipiec 15,9 kWh, sierpień 16,4 kWh) były
+    // oznaczane jako uszkodzone. Przy 20% przechodzą, a realne usterki
+    // nadal odpadają z ogromnym zapasem: wrzesień 6,4x, październik 11,1x.
+    const plausible = range <= cap * 1.20;
 
     // Twardy limit: nawet pełna bateria na start i pusta na koniec, η = 1,00
     const hardMax = charge + cap;

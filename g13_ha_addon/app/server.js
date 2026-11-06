@@ -42,7 +42,7 @@ const DEFAULT_OPTIONS = {
     produkcja: 13.2, oddanieHa: 13.2, poborHa: 16.0,
     zuzycieDomu: 29.2, ladowanie: 14.6, rozladowanie: 14.6,
   },
-  battery_capacity_kwh: 16.35,
+  battery_capacity_kwh: 14.34,   // 16S 280 Ah @ 3,2 V nominalnie; musi zgadzać się z validate.js
   battery_eta: 0.92,
   require_auth: false,
 };
