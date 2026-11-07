@@ -338,11 +338,12 @@
   </section>
 
   <section class="panel" style="margin-bottom:1.25rem;">
-    <h2>Koszt inwestycji</h2>
-    <p class="hint">Jednorazowy koszt instalacji PV. „Zwrot” liczony jest jako suma przypisów do depozytu (wartość energii oddanej do sieci) narastająco w czasie — niezależnie czy dana kwota została już wykorzystana na fakturę czy zostaje jako saldo, bo to i tak realna korzyść finansowa z instalacji.</p>
+    <h2>Koszt inwestycji (PV + magazyn)</h2>
+    <p class="hint"><strong>Wpisz tu koszt CAŁEJ instalacji: PV plus magazyn.</strong> Korzyść w tej zakładce (depozyt + autokonsumpcja) jest mierzona na danych, w których magazyn już pracuje — obniża on oddanie do sieci, więc podnosi autokonsumpcję. Licznik zawiera już efekt magazynu, więc mianownik też musi go obejmować. Zwrot samego magazynu liczony jest osobno w zakładce „Magazyn", z pola „Koszt magazynu". <strong>Nie dodawaj tych dwóch zwrotów do siebie</strong> — zysk magazynu jest składnikiem tej zakładki, nie osobną pozycją.</p>
+    <p class="hint">„Zwrot” liczony jest jako suma przypisów do depozytu (wartość energii oddanej do sieci) narastająco w czasie „Zwrot” liczony jest jako suma przypisów do depozytu (wartość energii oddanej do sieci) narastająco w czasie — niezależnie czy dana kwota została już wykorzystana na fakturę czy zostaje jako saldo, bo to i tak realna korzyść finansowa z instalacji.</p>
     <div class="roi-input-row">
-      <label for="inputKosztInwestycji">Koszt inwestycji [PLN]</label>
-      <input type="number" id="inputKosztInwestycji" step="0.01" min="0" placeholder="np. 35000">
+      <label for="inputKosztInwestycji">Koszt PV + magazyn [PLN]</label>
+      <input type="number" id="inputKosztInwestycji" step="0.01" min="0" placeholder="np. 26000 (PV 21000 + magazyn 5000)">
     </div>
     <div class="roi-input-row" style="margin-top:.75rem;">
       <label for="inputManualRate">Zapasowa stawka [PLN/kWh]</label>
@@ -458,6 +459,7 @@
   <section class="panel" style="margin-bottom:1.25rem;">
     <h2>Rzeczywista wydajność magazynu (z danych Home Assistant)</h2>
     <p class="hint">Koszt magazynu wpisujesz raz, w sekcji „Parametry" niżej — używany jest tu i tam, bo to ten sam fizyczny magazyn.</p>
+    <p class="hint"><strong>Oszczędność</strong> = energia oddana z magazynu × stawka strefy godziny oddania, minus koszt energii kupionej z sieci do naładowania. Ładowanie z PV nie jest odejmowane — to pełny koszt zakupu, którego uniknąłeś. <strong>Utracony depozyt</strong> i <strong>Przyrostowo</strong> są obok jako osobna informacja: odpowiadają na inne pytanie („o ile lepiej wyszedłem na dołożeniu magazynu do samej PV") i zależą od tego, czy realnie zużywasz nadpłatę. Stawki strefowe wpisujesz w zakładce „Strefy" — bez nich wycena idzie jedną płaską stawką i jest tak oznaczona.</p>
     <div class="table-scroll">
       <table>
         <thead>
@@ -466,8 +468,10 @@
             <th>Naładowano [kWh]</th>
             <th>Rozładowano [kWh]</th>
             <th title="Energia kupiona z sieci do naładowania baterii">Z sieci [kWh]</th>
-            <th title="Koszt energii kupionej do baterii">Koszt zakupu</th>
-            <th title="Wartość rozładowania minus koszt zakupu">Zysk netto</th>
+            <th title="Koszt energii kupionej z sieci do naładowania baterii, po stawce strefy godziny ładowania">Koszt zakupu</th>
+            <th title="Energia oddana z magazynu × stawka strefy godziny oddania, minus koszt zakupu z sieci. Ładowanie z PV nie jest odejmowane — to pełny koszt zakupu, którego uniknąłeś.">Oszczędność</th>
+            <th title="Depozyt, którego ta energia nie zarobiła, bo została w magazynie zamiast pójść do sieci. Liczony po RCE z godzin ładowania. To koszt alternatywny rozszerzenia.">Utracony depozyt</th>
+            <th title="Oszczędność minus utracony depozyt — czyli o ile lepiej wyszedłeś na dołożeniu magazynu do samej instalacji PV">Przyrostowo</th>
           </tr>
         </thead>
         <tbody id="realBatteryBody"></tbody>
@@ -653,7 +657,7 @@ const state = {
   hourlyElicznik: {},  // 'YYYY-MM-DD_HH' -> {date,hour,oddaniePoZbil,poborPoZbil}
   rceHourly: {},        // 'YYYY-MM-DD_HH' -> averaged PLN/MWh
   months: {},            // 'YYYY-MM' -> {kwh,przypis,kosztEnergii,kosztDystrybucji,manual,missingHours}
-  kosztInwestycji: 0,    // jednorazowy koszt instalacji PV, do panelu Analiza (ROI)
+  kosztInwestycji: 0,    // F55: koszt CAŁEJ instalacji (PV + magazyn), bo licznik ROI zawiera efekt magazynu
   manualRatePlnKwh: null, // zapasowa stawka PLN/kWh, gdy nie da się jej wyliczyć z Depozytu
   refundRate: 0.30,       // 30% — rozliczenie godzinowe RCE potwierdzone przez użytkownika
   refundCapBasis: 'base', // 'base' = 30% od wartości energii wprowadzonej (literalny art. 4 ust. 11a pkt 2);
@@ -1509,9 +1513,17 @@ function estimateGridCharge(monthKey){
   }
   let kwh = 0, n = 0, night = 0, day = 0;
   for (const h of hours){
-    if (h.produkcja <= 0.01 && h.ladowanie > 0.05){
+    const localHour = V.localHourLabel(h.ts).hour;
+    /* F52: zerowa produkcja to nie jedyny dowód nocy. Rejestr
+     * solar_energy_total jest skażony rozładowaniem (audyt cz. 14), więc
+     * w nocy pokazuje fikcyjne kWh i ładowanie z sieci umykało.
+     * Okno 22–04 jest ciemne przez cały rok na 51°N — przesłanka
+     * astronomiczna, niezależna od rejestru. Na realnych danych wykrywa
+     * +29,1 kWh więcej (185,8 → 214,9 kWh). Podział noc/dzień zostaje
+     * przy starym progu ≤5, żeby nie zmieniać znaczenia tych kolumn. */
+    const dark = localHour >= 22 || localHour < 4;
+    if ((h.produkcja <= 0.01 || dark) && h.ladowanie > 0.05){
       kwh += h.ladowanie; n++;
-      const localHour = V.localHourLabel(h.ts).hour;
       if (localHour >= 22 || localHour <= 5) night += h.ladowanie;
       else day += h.ladowanie;
     }
@@ -1761,7 +1773,16 @@ function renderAnaliza(){
     const hasHa = m.haZuzycieDomu !== undefined && m.haPobor !== undefined;
     const hasPrecise = m.produkcjaKwh !== undefined && m.produkcjaKwh !== null;
     let autoKwh, tier, autoWarning = null;
-    if (hasHa){
+    let autoPlnOverride = null;
+    /* F50/F51: najpierw wycena godzinowa po strefach z eksportem z eLicznika.
+     * Dopiero gdy jej nie ma, spadamy do starych gałęzi — i wtedy są one
+     * oznaczone jako mniej dokładne. */
+    const sc = selfConsumptionFor(key);
+    if (sc && sc.priced){
+      autoKwh = sc.kwh;
+      tier = 'strefy';
+      autoPlnOverride = sc.pln;
+    } else if (hasHa){
       // D1: było Math.max(0, …) z tier='ha' ustawionym z góry → gdy licznik
       // poboru eksplodował (lipiec: 3019,7 kWh wobec 38,4 z TAURONa),
       // różnica −2404 kWh była uciszana do 0,0 i opisana „dokładne (HA)”.
@@ -1801,7 +1822,8 @@ function renderAnaliza(){
     // Uśredniona efektywna stawka PLN/kWh (własna miesiąca, inaczej uśredniona z całych danych, inaczej ręczna zapasowa)
     // — ta sama funkcja co w Magazynie/Strefach, żeby stawka nigdy nie rozjechała się między zakładkami.
     const rateUsed = resolveEffectiveRate(key);
-    const autoWartosc = (autoKnown && rateUsed !== null) ? autoKwh * rateUsed : null;
+    const autoWartosc = autoPlnOverride !== null ? autoPlnOverride
+      : ((autoKnown && rateUsed !== null) ? autoKwh * rateUsed : null);
     const zysk = przypis + (autoWartosc || 0);
     cum += zysk;
     return {key:key, przypis:przypis, autoKwh:autoKwh, autoWartosc:autoWartosc, zysk:zysk, cum:cum,
@@ -1818,6 +1840,7 @@ function renderAnaliza(){
         ? ' <span class="tag-warn" style="background:#7f1d1d;color:#fff;" title="' + V.escapeHtml(r.autoWarning || 'błąd danych') + '">BŁĄD DANYCH</span>'
         : r.autoWarning
         ? ' <span class="tag-warn" title="' + V.escapeHtml(r.autoWarning) + '">sprawdź</span>'
+        : r.tier === 'strefy' ? ' <span class="tag-manual" title="Godzina po godzinie: produkcja + rozładowanie − ładowanie − eksport z eLicznika, wycenione po strefie danej godziny">strefowe</span>'
         : r.tier === 'ha' ? ' <span class="tag-manual" title="Z prawdziwego zużycia domu (Home Assistant)">dokładne (HA)</span>'
         : r.tier === 'growatt' ? ' <span class="tag-manual" title="Z realnej produkcji falownika">dokładne</span>'
         : (r.autoKnown ? ' <span class="tag-warn" title="Szacunek dzień/noc z eLicznika">szac.</span>' : '');
@@ -2115,12 +2138,13 @@ function renderRealBattery(){
   const readoutEl = document.getElementById('readoutRealBattery');
   const subEl = document.getElementById('readoutRealBatterySub');
   if (!keys.length){
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Brak danych z Home Assistant — wgraj eksport w zakładce Analiza.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="8" class="empty-state">Brak danych z Home Assistant — wgraj eksport w zakładce Analiza.</td></tr>';
     document.getElementById('realBatteryFoot').innerHTML = '';
     if (readoutEl){ readoutEl.textContent = '—'; subEl.textContent = 'brak danych z Home Assistant'; }
     return;
   }
   let sumCharge=0, sumDischarge=0, sumValue=0, monthsWithValue=0, sumGridKwh=0, sumGridCost=0;
+  let sumLost=0, sumIncr=0, incrMonths=0, flatMonths=0;
   // F33: miesiące z niemożliwym bilansem NIE mogą wchodzić do nagłówka ROI.
   // Wcześniej wchodziły, a tylko wiersz był oznaczony na czerwono.
   let trustedValue=0, trustedHours=0, trustedMonths=0;
@@ -2129,18 +2153,34 @@ function renderRealBattery(){
   tbody.innerHTML = keys.map(function(k){
     const m = state.months[k];
     const rate = resolveEffectiveRate(k);
-    // D3: było value = haRozladowanie * rate — całe rozładowanie traktowane
-    // jako oszczędność, bez kosztu energii kupionej do naładowania baterii.
-    // Od września bateria jest ładowana z sieci (sierpień: dokładnie 0 kWh),
-    // więc zawyżenie trzeba odjąć po cenie ZAKUPU, nie po cenie depozytu.
     const grid = estimateGridCharge(k);
     const bc = state.haBatteryCheck[k];
-    // F48: bez danych PV nie da się policzyć kosztu ładowania, więc nie da
-    // się też policzyć zysku. Wartość NULL, nie zero i nie całe rozładowanie.
-    const value = (rate === null || !grid.reliable) ? null : m.haRozladowanie * rate - grid.kwh * rate;
-    const gridCost = (rate !== null && grid.reliable && grid.kwh > 0) ? grid.kwh * rate : 0;
+    /* F54: miara główna to OSZCZĘDNOŚĆ — energia oddana × stawka strefy
+     * godziny oddania, minus koszt energii kupionej do naładowania.
+     * Ładowanie z PV NIE jest odejmowane: to pełny koszt zakupu, którego
+     * uniknąłeś. Utracony depozyt i wynik przyrostowy są OBOK, nie wplecione,
+     * bo wartość krańcowa depozytu zależy od tego, czy nadpłata jest zużyta. */
+    const eco = batteryEconomicsFor(k);
+    let value = null, gridCost = 0, gridKwh = grid.kwh;
+    let lost = null, incr = null, flat = false;
+    if (eco && eco.priced && grid.reliable){
+      value = eco.grossPln;
+      gridCost = eco.gridCostPln;
+      gridKwh = eco.gridKwh;
+      lost = eco.lostDepositPln;
+      incr = eco.incrementalPln;
+    } else if (rate !== null && grid.reliable){
+      // Brak stawek strefowych → stara metoda płaską stawką, ale JAWNIE
+      // oznaczona. Nie udajemy wyceny strefowej, której nie ma.
+      value = m.haRozladowanie * rate - grid.kwh * rate;
+      gridCost = grid.kwh * rate;
+      flat = true;
+    }
     sumCharge += m.haLadowanie; sumDischarge += m.haRozladowanie;
-    if (grid.reliable){ sumGridKwh += grid.kwh; sumGridCost += gridCost; }
+    if (grid.reliable){ sumGridKwh += gridKwh; sumGridCost += gridCost; }
+    if (flat) flatMonths++;
+    if (lost !== null){ sumLost += lost; }
+    if (incr !== null){ sumIncr += incr; incrMonths++; }
     if (value !== null){
       sumValue += value; monthsWithValue++;
       if (bc && !bc.plausible){
@@ -2150,9 +2190,6 @@ function renderRealBattery(){
         trustedHours += (m.haHours || (state.haHourly[k] ? state.haHourly[k].length : 0));
       }
     } else if (!grid.reliable){
-      // Luka danych istnieje niezależnie od tego, czy mamy cenę. Bez tego
-      // warunku objaśnienie znikało dokładnie wtedy, gdy miesiąc był
-      // najmniej kompletny (brak RCE ORAZ brak PV).
       noPvMonths++;
       noPvList.push(formatMonthLabel(k) + ' (' + (grid.pvHours || 0) + ' z '
         + (m.haHours || (state.haHourly[k] ? state.haHourly[k].length : 0)) + ' h)');
@@ -2161,16 +2198,18 @@ function renderRealBattery(){
       ? ' <span class="tag-warn" style="background:#7f1d1d;color:#fff;" title="' + V.escapeHtml(bc.reason || '') + '">bilans niemożliwy</span>'
       : (!grid.reliable
         ? ' <span class="tag-warn" title="Za mało godzin z pomiarem produkcji, żeby oszacować ładowanie z sieci">brak danych PV</span>'
-        : '');
+        : (flat ? ' <span class="tag-warn" title="Brak stawek strefowych dla tego miesiąca — wycena jedną płaską stawką, nie po strefach">płaska stawka</span>' : ''));
     return '<tr>' +
       '<td class="col-month">' + V.escapeHtml(formatMonthLabel(k)) + warn + '</td>' +
       '<td class="num">' + formatKwh1(m.haLadowanie) + '</td>' +
       '<td class="num">' + formatKwh1(m.haRozladowanie) + '</td>' +
       '<td class="num">' + (grid.reliable
-        ? formatKwh1(grid.kwh) + (grid.estimated ? ' <span class="tag-warn" title="Szacunek: ładowanie przy zerowej produkcji AC">szac.</span>' : '')
+        ? formatKwh1(gridKwh) + (grid.estimated ? ' <span class="tag-warn" title="Szacunek: ładowanie w godzinach bez produkcji PV lub astronomicznie ciemnych">szac.</span>' : '')
         : '<span class="tag-warn" title="Brak pomiaru produkcji w tym miesiącu — szacunek byłby fikcją">—</span>') + '</td>' +
-      '<td class="num accent-rust">' + ((rate === null || !grid.reliable) ? '—' : formatPLN(-gridCost)) + '</td>' +
+      '<td class="num accent-rust">' + (value === null ? '—' : formatPLN(-gridCost)) + '</td>' +
       '<td class="num accent-strong">' + (value === null ? '—' : formatPLN(value)) + '</td>' +
+      '<td class="num accent-amber">' + (lost === null ? '—' : formatPLN(-lost)) + '</td>' +
+      '<td class="num">' + (incr === null ? '—' : formatPLN(incr)) + '</td>' +
     '</tr>';
   }).join('');
   document.getElementById('realBatteryFoot').innerHTML = '<tr><td>SUMA</td>' +
@@ -2178,7 +2217,9 @@ function renderRealBattery(){
     '<td class="num">' + formatKwh1(sumDischarge) + '</td>' +
     '<td class="num">' + formatKwh1(sumGridKwh) + '</td>' +
     '<td class="num accent-rust">' + formatPLN(-sumGridCost) + '</td>' +
-    '<td class="num accent-strong">' + formatPLN(sumValue) + '</td></tr>';
+    '<td class="num accent-strong">' + formatPLN(sumValue) + '</td>' +
+    '<td class="num accent-amber">' + (sumLost > 0 ? formatPLN(-sumLost) : '—') + '</td>' +
+    '<td class="num">' + (incrMonths > 0 ? formatPLN(sumIncr) : '—') + '</td></tr>';
 
   // F33: pod stołem pokaż, ile z sumy pochodzi z miesięcy niewiarygodnych.
   const noteEl = document.getElementById('realBatteryNote');
@@ -2532,8 +2573,146 @@ async function loadElicznikHourly(){
   return hours;
 }
 
+/* Godziny HA muszą przetrwać restart, bo od 0.3.2 to z nich liczy się
+ * ekonomia magazynu (strefa godziny oddania, RCE godziny ładowania).
+ * Bez zapisu po przeładowaniu strony tabela pokazywałaby „—", mimo że
+ * eLicznik i RCE są trwałe. Zapis per miesiąc, jak przy eLiczniku. */
+async function saveHaHourly(){
+  if (!storageUsable()) return;
+  for (const mk in state.haHourly){
+    const rows = state.haHourly[mk];
+    if (!rows || !rows.length) continue;
+    // Tylko pola potrzebne do ekonomii — pełny wiersz ma 9 pól i ~3× więcej tekstu.
+    const compact = rows.map(function(h){
+      return {ts:h.ts, produkcja:h.produkcja, ladowanie:h.ladowanie,
+              rozladowanie:h.rozladowanie, oddanieHa:h.oddanieHa};
+    });
+    try{ await window.storage.set('ha-hourly-' + mk, JSON.stringify(compact)); }
+    catch(e){ log('Nie udało się zapisać godzin HA za ' + mk + ': ' + e.message, 'error'); }
+  }
+}
+
+async function loadHaHourly(){
+  if (!storageUsable()) return 0;
+  let hours = 0;
+  try{
+    const l = await window.storage.list('ha-hourly-');
+    const keys = (l && l.keys) || [];
+    for (const k of keys){
+      try{
+        const r = await window.storage.get(k);
+        if (!r || !r.value) continue;
+        const arr = JSON.parse(r.value);
+        if (!Array.isArray(arr)) continue;
+        const mk = k.slice('ha-hourly-'.length);
+        state.haHourly[mk] = arr;
+        hours += arr.length;
+      } catch(e){ log('Uszkodzony zapis godzin HA (' + k + '): ' + e.message, 'warn'); }
+    }
+  } catch(e){ log('Nie udało się wczytać godzin HA: ' + e.message, 'warn'); }
+  return hours;
+}
+
+/* --------------------------------------------------------------------------
+ * batteryEconomicsFor — F54: ekonomia magazynu dla miesiąca z danych sesji.
+ *
+ * Miara główna to OSZCZĘDNOŚĆ (grossPln): energia oddana × stawka strefy
+ * godziny oddania, minus koszt energii kupionej do naładowania. Ładowanie
+ * z PV nie jest odejmowane — to pełny koszt zakupu, którego uniknąłeś.
+ *
+ * Obok, jako osobna informacja, utracony depozyt i wynik przyrostowy.
+ * Nie są wplecione w miarę główną, bo wartość krańcowa depozytu zależy od
+ * tego, czy użytkownik realnie zużywa nadpłatę (limit zwrotu 30%).
+ * ------------------------------------------------------------------------*/
+function batteryEconomicsFor(monthKey){
+  const rows = state.haHourly[monthKey];
+  const m = state.months[monthKey] || {};
+  if (!rows || !rows.length) return null;
+  const hours = rows.map(function(h){
+    const lab = V.localHourLabel(h.ts);
+    return {date:lab.date, hour:lab.hour, produkcja:h.produkcja,
+            ladowanie:h.ladowanie, rozladowanie:h.rozladowanie};
+  });
+  // Współczynniki AC/DC mierzone z miesięcy, w których OBA źródła były
+  // zdrowe i porównywalne — nie wpisane z góry.
+  const healthy = Object.keys(state.months).filter(function(k){
+    const bc = state.bmsCheck[k];
+    const mm = state.months[k];
+    return bc && bc.comparable && !bc.suspect
+      && mm.growattLadowanie > 0 && mm.bmsLadowanie > 0
+      && mm.growattRozladowanie > 0 && mm.bmsRozladowanie > 0;
+  }).map(function(k){
+    const mm = state.months[k];
+    return {growattCharge:mm.growattLadowanie, bmsCharge:mm.bmsLadowanie,
+            growattDischarge:mm.growattRozladowanie, bmsDischarge:mm.bmsRozladowanie};
+  });
+  const f = V.batteryAcDcFactors(healthy);
+  // BMS mierzy po stronie DC, więc do wyceny w domu trzeba przejść na AC.
+  // Growatt już jest po stronie AC — wtedy współczynnik 1.
+  const fromBms = state.bmsCheck[monthKey] && state.bmsCheck[monthKey].source === 'bms';
+  const zoneRates = state.zoneRates || {};
+  const res = V.batteryEconomicsMonth(hours, {
+    zoneRates: zoneRates,
+    fallbackRate: null,                 // bez stawki strefowej NIE zgadujemy
+    zoneOf: function(d, hh){
+      const r = state.hourlyElicznik[d + '_' + String(hh).padStart(2,'0')];
+      return r && r.strefa ? r.strefa : null;
+    },
+    rceOf: function(d, hh){
+      const v = state.rceHourly[d + '_' + String(hh).padStart(2,'0')];
+      return (v === undefined) ? null : v;
+    },
+    scaleCharge: fromBms ? f.charge : 1,
+    scaleDischarge: fromBms ? f.discharge : 1,
+    depositMult: V.depositMultiplier(monthKey),
+  });
+  res.acDc = f;
+  res.fromBms = !!fromBms;
+  return res;
+}
+
+/* F50/F51: autokonsumpcja z jednego zbioru godzin, po strefach,
+ * z eksportem z eLicznika. Zastępuje `zużycieDomu − pobór`, które było
+ * algebraicznie równe PV − eksport, ale z szumem dwóch osobnych filtrów. */
+function selfConsumptionFor(monthKey){
+  const rows = state.haHourly[monthKey];
+  if (!rows || !rows.length) return null;
+  const hours = rows.map(function(h){
+    const lab = V.localHourLabel(h.ts);
+    return {date:lab.date, hour:lab.hour, produkcja:h.produkcja,
+            ladowanie:h.ladowanie, rozladowanie:h.rozladowanie};
+  });
+  const healthy = Object.keys(state.months).filter(function(k){
+    const bc = state.bmsCheck[k]; const mm = state.months[k];
+    return bc && bc.comparable && !bc.suspect
+      && mm.growattLadowanie > 0 && mm.bmsLadowanie > 0
+      && mm.growattRozladowanie > 0 && mm.bmsRozladowanie > 0;
+  }).map(function(k){
+    const mm = state.months[k];
+    return {growattCharge:mm.growattLadowanie, bmsCharge:mm.bmsLadowanie,
+            growattDischarge:mm.growattRozladowanie, bmsDischarge:mm.bmsRozladowanie};
+  });
+  const f = V.batteryAcDcFactors(healthy);
+  const fromBms = state.bmsCheck[monthKey] && state.bmsCheck[monthKey].source === 'bms';
+  return V.selfConsumptionMonth(hours, {
+    zoneRates: state.zoneRates || {},
+    zoneOf: function(d, hh){
+      const r = state.hourlyElicznik[d + '_' + String(hh).padStart(2,'0')];
+      return r && r.strefa ? r.strefa : null;
+    },
+    // F51: eLicznik jest licznikiem rozliczeniowym — wygrywa z Growatt.
+    exportOf: function(d, hh){
+      const r = state.hourlyElicznik[d + '_' + String(hh).padStart(2,'0')];
+      return (r && typeof r.oddaniePoZbil === 'number') ? r.oddaniePoZbil : null;
+    },
+    scaleCharge: fromBms ? f.charge : 1,
+    scaleDischarge: fromBms ? f.discharge : 1,
+  });
+}
+
 async function saveState(){
   if (!storageUsable()) return;
+  try{ await saveHaHourly(); }catch(e){}
   try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates,
     // F36: bez tego po restarcie znikały oznaczenia „bilans niemożliwy”
     // i tabela odrzuconych godzin, a zawyżone liczby zostawały.
@@ -2602,6 +2781,10 @@ async function loadState(){
         }
       }
     } catch(e){ /* brak cache — pierwsze uruchomienie */ }
+    const restoredHa = await loadHaHourly();
+    if (restoredHa > 0){
+      log('Wczytano ' + restoredHa + ' godzin Home Assistant z poprzedniej sesji.', 'info');
+    }
     const restoredHours = await loadElicznikHourly();
     if (restoredHours > 0){
       log('Wczytano ' + restoredHours + ' godzin eLicznika z poprzedniej sesji.', 'info');

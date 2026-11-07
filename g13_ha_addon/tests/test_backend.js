@@ -386,6 +386,125 @@ t('M9 próg konfigurowalny przez resolveConfig', () => {
   assert.strictEqual(V.resolveConfig().bmsMinCoverage, 0.90);
 });
 
+
+/* ===== F54: ekonomia magazynu po strefach + koszt alternatywny ===== */
+const BE = V.batteryEconomicsMonth;
+const ZR = { T1: 0.90, T2: 1.50, T3: 0.63 };
+function hAt(hour, o) {
+  return Object.assign({ date: '2026-07-01', hour: hour, produkcja: 0, ladowanie: 0, rozladowanie: 0 }, o || {});
+}
+t('M17 rozładowanie wyceniane po strefie godziny ODDANIA, nie płasko', () => {
+  const r = BE([hAt(20, { rozladowanie: 2 }), hAt(2, { rozladowanie: 2 })],
+    { zoneRates: ZR, zoneOf: (d, h) => (h === 20 ? 'T2' : 'T3'), rceOf: () => 400 });
+  // 2 kWh × 1,50 + 2 kWh × 0,63 = 4,26 — płaska 0,63 dałaby 2,52
+  assert.strictEqual(r.dischargePln, 4.26);
+  assert.strictEqual(r.priced, true);
+});
+t('M18 utracony depozyt pomniejsza zysk przyrostowy', () => {
+  const r = BE([hAt(12, { produkcja: 5, ladowanie: 4 }), hAt(20, { rozladowanie: 3.8 })],
+    { zoneRates: ZR, zoneOf: (d, h) => (h === 20 ? 'T2' : 'T3'), rceOf: () => 500 });
+  // brutto = 3,8 × 1,50 = 5,70; depozyt = 4 × 0,5 × 1,23 = 2,46
+  assert.strictEqual(r.grossPln, 5.7);
+  assert.strictEqual(r.lostDepositPln, 2.46);
+  assert.strictEqual(r.incrementalPln, 3.24);
+  assert.ok(r.incrementalPln < r.grossPln, 'przyrostowo musi być mniejsze od brutto');
+});
+t('M19 ujemne RCE nie powiększa kosztu alternatywnego', () => {
+  const r = BE([hAt(12, { produkcja: 5, ladowanie: 4 }), hAt(20, { rozladowanie: 3.8 })],
+    { zoneRates: ZR, zoneOf: () => 'T2', rceOf: () => -80 });
+  assert.strictEqual(r.lostDepositPln, 0, 'ujemna cena → depozyt 0, nie ujemny koszt');
+  assert.strictEqual(r.incrementalPln, r.grossPln);
+});
+t('M20 noc zeruje skażoną produkcję → ładowanie idzie z sieci', () => {
+  // rejestr pokazuje 2 kWh "produkcji" o 23:00 przy rozładowaniu — to skażenie
+  const r = BE([hAt(23, { produkcja: 2, ladowanie: 3 })],
+    { zoneRates: ZR, zoneOf: () => 'T3', rceOf: () => 400 });
+  assert.strictEqual(r.gridKwh, 3, 'w nocy całe ładowanie musi być z sieci');
+  assert.strictEqual(r.pvChargeKwh, 0);
+  assert.strictEqual(r.lostDepositPln, 0);
+});
+t('M21 brak stawek strefowych → brak wyceny, nie zero', () => {
+  const r = BE([hAt(20, { rozladowanie: 3 })], { zoneRates: {}, zoneOf: () => 'T9' });
+  assert.strictEqual(r.priced, false);
+  assert.strictEqual(r.incrementalPln, null);
+  assert.ok(/stawki strefowe/.test(r.reason), r.reason);
+});
+t('M22 brak RCE przy ładowaniu z PV → przyrostowo NULL, nie zawyżone brutto', () => {
+  const r = BE([hAt(12, { produkcja: 5, ladowanie: 4 }), hAt(20, { rozladowanie: 3.8 })],
+    { zoneRates: ZR, zoneOf: () => 'T2', rceOf: () => null });
+  assert.strictEqual(r.priced, true, 'stawki są, więc brutto da się policzyć');
+  assert.strictEqual(r.incrementalKnown, false);
+  assert.strictEqual(r.incrementalPln, null, 'brakujący koszt nie może wyglądać jak zero');
+  assert.ok(/RCE/.test(r.reason), r.reason);
+  assert.strictEqual(r.pvChargeUnpriced, 4);
+});
+t('M23 bez ładowania z PV brak RCE nie blokuje wyniku', () => {
+  const r = BE([hAt(20, { rozladowanie: 3 })],
+    { zoneRates: ZR, zoneOf: () => 'T2', rceOf: () => null });
+  assert.strictEqual(r.incrementalKnown, true, 'nie ma czego wyceniać po RCE');
+  assert.strictEqual(r.incrementalPln, 4.5);
+});
+t('M24 współczynniki AC/DC skalują energię przed wyceną', () => {
+  const r = BE([hAt(20, { rozladowanie: 10 })],
+    { zoneRates: ZR, zoneOf: () => 'T2', rceOf: () => 400, scaleDischarge: 0.9520 });
+  assert.strictEqual(r.discharge, 9.52);
+  assert.strictEqual(r.dischargePln, 14.28);
+});
+t('M25 batteryAcDcFactors mierzy współczynniki z miesięcy zdrowych', () => {
+  const f = V.batteryAcDcFactors([
+    { growattCharge: 346.2, bmsCharge: 345.2, growattDischarge: 318.4, bmsDischarge: 333.5 },
+    { growattCharge: 286.8, bmsCharge: 283.8, growattDischarge: 261.3, bmsDischarge: 273.9 },
+    { growattCharge: 355.3, bmsCharge: 350.8, growattDischarge: 327.2, bmsDischarge: 344.3 },
+    { growattCharge: 338.8, bmsCharge: 334.8, growattDischarge: 313.3, bmsDischarge: 330.1 },
+  ]);
+  assert.strictEqual(f.measured, true);
+  assert.strictEqual(f.months, 4);
+  assert.ok(Math.abs(f.charge - 1.0096) < 0.0002, String(f.charge));
+  assert.ok(Math.abs(f.discharge - 0.9520) < 0.0002, String(f.discharge));
+});
+t('M26 batteryAcDcFactors bez danych → 1, nie zgadnięta stała', () => {
+  const f = V.batteryAcDcFactors([]);
+  assert.strictEqual(f.measured, false);
+  assert.strictEqual(f.charge, 1);
+  assert.strictEqual(f.discharge, 1);
+});
+
+
+/* ===== F50/F51: autokonsumpcja z jednego zbioru godzin ===== */
+const SC = V.selfConsumptionMonth;
+t('M27 autokonsumpcja = PV + rozład − ład − eksport, po strefie godziny', () => {
+  const r = SC([hAt(12, { produkcja: 5, ladowanie: 4 }), hAt(20, { rozladowanie: 3.8 })],
+    { zoneRates: ZR, zoneOf: (d, h) => (h === 12 ? 'T1' : 'T2'),
+      exportOf: (d, h) => (h === 12 ? 1 : 0) });
+  // 12:00 → 5+0−4−1 = 0 kWh ; 20:00 → 0+3,8−0−0 = 3,8 kWh × 1,50
+  assert.strictEqual(r.kwh, 3.8);
+  assert.strictEqual(r.pln, 5.7);
+  assert.strictEqual(r.hours, 2);
+});
+t('M28 brak eksportu z eLicznika → godzina POMINIĘTA, nie zero', () => {
+  const r = SC([hAt(12, { produkcja: 5 }), hAt(20, { rozladowanie: 3.8 })],
+    { zoneRates: ZR, zoneOf: () => 'T2', exportOf: (d, h) => (h === 12 ? null : 0) });
+  assert.strictEqual(r.hours, 1, 'godzina bez eksportu nie może wejść z zerem');
+  assert.strictEqual(r.kwh, 3.8);
+});
+t('M29 noc zeruje skażoną produkcję w autokonsumpcji', () => {
+  const r = SC([hAt(23, { produkcja: 2, rozladowanie: 3 })],
+    { zoneRates: ZR, zoneOf: () => 'T3', exportOf: () => 0 });
+  assert.strictEqual(r.kwh, 3, 'fałszywe 2 kWh PV nie może wejść');
+});
+t('M30 brak stawek strefowych → pln NULL, nie wycena zerowa', () => {
+  const r = SC([hAt(20, { rozladowanie: 3.8 })],
+    { zoneRates: {}, zoneOf: () => 'T9', exportOf: () => 0 });
+  assert.strictEqual(r.priced, false);
+  assert.strictEqual(r.pln, null);
+  assert.ok(/stawki strefowe/.test(r.reason), r.reason);
+});
+t('M31 eksport ujemny nie podnosi autokonsumpcji', () => {
+  const r = SC([hAt(12, { produkcja: 5 })],
+    { zoneRates: ZR, zoneOf: () => 'T1', exportOf: () => -2 });
+  assert.strictEqual(r.kwh, 5, 'max(0, eksport) — ujemny nie dodaje');
+});
+
 // sprzątanie
 fs.rmSync(TMP, { recursive: true, force: true });
 

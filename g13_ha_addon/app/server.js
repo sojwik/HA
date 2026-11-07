@@ -81,7 +81,23 @@ function bmsEntities() {
   const out = { charge: '', discharge: '' };
   const pairs = [['charge', options.bms_charge_entity], ['discharge', options.bms_discharge_entity]];
   pairs.forEach(function (pair) {
-    const key = pair[0], raw = pair[1];
+    const key = pair[0];
+    let raw = pair[1];
+    // F53: lista w YAML była zrzucona PO CICHU (typeof raw !== 'string'),
+    // co dawało 0 wierszy BMS bez żadnego komunikatu — użytkownik nie miał
+    // jak dojść, że przyczyną jest nawias kwadratowy. Lista 1-elementowa
+    // jest jednoznaczna, więc ją przyjmujemy. Dłuższa — jawna odmowa.
+    if (Array.isArray(raw)) {
+      if (raw.length === 1) {
+        raw = raw[0];
+        console.warn('[bms] ' + key + ': przyjęto encję z listy 1-elementowej. '
+          + 'Zalecany zapis to skalar: bms_' + key + '_entity: "sensor...."');
+      } else {
+        console.warn('[bms] ' + key + ': podaj JEDNĄ encję, nie listę '
+          + raw.length + ' elementów — pomijam.');
+        return;
+      }
+    }
     if (typeof raw !== 'string' || !raw.trim()) return;
     const id = raw.trim();
     if (!/^[a-z_]+\.[a-z0-9_]+$/.test(id)) {
