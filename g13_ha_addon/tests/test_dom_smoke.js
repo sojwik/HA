@@ -90,8 +90,17 @@ function serveDir(dir) {
 
   console.log('\n=== Kontenery diagnostyczne istnieją ===');
   t('D6 #haDiagnostics w DOM', !!w.document.getElementById('haDiagnostics'));
-  t('D7 tabela magazynu ma 6 kolumn',
-    w.document.querySelectorAll('#realBatteryBody')[0].closest('table').querySelectorAll('thead th').length === 6);
+  // F54 (0.3.2): 6 → 8 kolumn. Doszły „Utracony depozyt" i „Przyrostowo",
+  // a „Zysk netto" zmieniło nazwę na „Oszczędność" — to ta sama miara,
+  // ale teraz wyceniana po strefie godziny oddania, nie płaską stawką.
+  t('D7 tabela magazynu ma 8 kolumn',
+    w.document.querySelectorAll('#realBatteryBody')[0].closest('table').querySelectorAll('thead th').length === 8);
+  t('D7b nagłówki rozdzielają oszczędność od wyniku przyrostowego', () => {
+    const ths = Array.from(w.document.querySelectorAll('#realBatteryBody')[0]
+      .closest('table').querySelectorAll('thead th')).map(x => x.textContent);
+    return ths.includes('Oszczędność') && ths.includes('Utracony depozyt')
+      && ths.includes('Przyrostowo') && !ths.includes('Zysk netto');
+  });
 
   console.log('\n=== XSS: nazwa strefy nie wykonuje kodu ===');
   // Wstrzykujemy złośliwą nazwę strefy przez publiczny escape i sprawdzamy,
@@ -547,6 +556,77 @@ function serveDir(dir) {
   t('D47 eksport prosi o change i sum (liczniki energii)',
     /change/.test(expCall2) && /sum/.test(expCall2), 'URL: ' + expCall2);
   dExp2.window.close();
+
+
+  console.log('\n=== D48–D51: ekonomia magazynu po strefach (0.3.2) ===');
+  // Fixture policzony ręcznie i potwierdzony funkcją biblioteki:
+  //   12:00 T1 0,90 — PV 5, ład 4  → ładowanie z PV 4 kWh
+  //   20:00 T2 1,50 — rozład 3,8   → 5,70 zł
+  //   23:00 T3 0,63 — ład 2, ciemno → z sieci 2 kWh = 1,26 zł
+  //   02:00 T3 0,63 — rozład 1     → 0,63 zł
+  //   brutto = 6,33 − 1,26 = 5,07 ; depozyt = 4 × 0,5 × 1,23 = 2,46
+  //   przyrostowo = 5,07 − 2,46 = 2,61
+  function ecoKv(withZoneRates){
+    const mk = '2026-07';
+    function ts(h){ return Date.UTC(2026, 6, 1, h - 2); }   // lipiec = UTC+2
+    const rows = [
+      { ts: ts(12), produkcja: 5, ladowanie: 4, rozladowanie: 0, oddanieHa: 0 },
+      { ts: ts(20), produkcja: 0, ladowanie: 0, rozladowanie: 3.8, oddanieHa: 0 },
+      { ts: ts(23), produkcja: 0, ladowanie: 2, rozladowanie: 0, oddanieHa: 0 },
+      { ts: ts(2),  produkcja: 0, ladowanie: 0, rozladowanie: 1, oddanieHa: 0 },
+    ];
+    const el = {}, rce = {};
+    [[12,'T1'],[20,'T2'],[23,'T3'],[2,'T3']].forEach(function(p){
+      const key = '2026-07-01_' + String(p[0]).padStart(2,'0');
+      el[key] = { date:'2026-07-01', hour:p[0], oddaniePoZbil:0, poborPoZbil:0, strefa:p[1] };
+      rce[key] = p[0] === 12 ? 500 : 400;
+    });
+    const ledger = {
+      months: { '2026-07': { haLadowanie:6, haRozladowanie:4.8, haPvHours:4, haHours:4 } },
+      zoneRates: withZoneRates ? { T1:0.90, T2:1.50, T3:0.63 } : {},
+      manualRatePlnKwh: 0.63,
+      bmsCheck: { '2026-07': { source:'growatt', comparable:true, suspect:false } },
+      haBatteryCheck: { '2026-07': { plausible:true } },
+    };
+    return {
+      'monthly-ledger': JSON.stringify(ledger),
+      'ha-hourly-2026-07': JSON.stringify(rows),
+      'elicznik-hourly-2026-07': JSON.stringify(el),
+      'rce-cache': JSON.stringify({ v:2, data:rce }),
+    };
+  }
+  const dEco = await loadWithCache(null, ecoKv(true), cfgBms, undefined, null);
+  // Kod jest w IIFE, więc render wyzwalamy przez UI — tak jak użytkownik.
+  dEco.window.document.getElementById('inputBatCost').value = '5000';
+  dEco.window.document.getElementById('inputBatCost')
+    .dispatchEvent(new dEco.window.Event('change', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 300));
+  function ecoCells(){
+    const tr = dEco.window.document.querySelectorAll('#realBatteryBody tr')[0];
+    return tr ? Array.from(tr.querySelectorAll('td')).map(x => x.textContent.trim()) : [];
+  }
+  const cellsEco = ecoCells();
+  t('D48 oszczędność liczona po strefie godziny oddania (5,07 zł)',
+    cellsEco.length === 8 && /5,07/.test(cellsEco[5]), JSON.stringify(cellsEco));
+  t('D49 utracony depozyt pokazany osobno (−2,46 zł)',
+    /2,46/.test(cellsEco[6] || ''), JSON.stringify(cellsEco));
+  t('D50 wynik przyrostowy = oszczędność − depozyt (2,61 zł)',
+    /2,61/.test(cellsEco[7] || ''), JSON.stringify(cellsEco));
+  dEco.window.close();
+
+  // Bez stawek strefowych nie zgadujemy — stara metoda, ale JAWNIE oznaczona.
+  const dFlat = await loadWithCache(null, ecoKv(false), cfgBms, undefined, null);
+  dFlat.window.document.getElementById('inputBatCost').value = '5000';
+  dFlat.window.document.getElementById('inputBatCost')
+    .dispatchEvent(new dFlat.window.Event('change', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 300));
+  const flatTxt = dFlat.window.document.getElementById('realBatteryBody').textContent;
+  const flatCells = Array.from(dFlat.window.document.querySelectorAll('#realBatteryBody tr')[0]
+    .querySelectorAll('td')).map(x => x.textContent.trim());
+  t('D51 brak stawek strefowych → tag „płaska stawka", nie cicha wycena',
+    /płaska stawka/.test(flatTxt) && flatCells[6] === '—' && flatCells[7] === '—',
+    flatTxt.slice(0, 160) + ' | ' + JSON.stringify(flatCells));
+  dFlat.window.close();
 
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);

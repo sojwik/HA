@@ -201,7 +201,7 @@ function waitForServer(timeoutMs) {
   }
 
 
-  console.log('\n=== BMS: konfiguracja i scalanie źródeł (S43–S52) ===');
+  console.log('\n=== BMS: konfiguracja i scalanie źródeł (S43–S56) ===');
   r = await req('GET', '/api/config');
   t('S43 /api/config wystawia pola BMS',
     r.json && 'bmsChargeEntity' in r.json && 'bmsDischargeEntity' in r.json, JSON.stringify(r.json));
@@ -306,6 +306,22 @@ function waitForServer(timeoutMs) {
     c2.bmsChargeEntity === '', JSON.stringify(c2));
   t('S52 nieprawidłowe entity_id odrzucone',
     c2.bmsDischargeEntity === '', JSON.stringify(c2));
+
+  // F53: lista w YAML dawała 0 wierszy BMS bez komunikatu.
+  const s3 = await spawnBms({
+    bms_charge_entity: ['sensor.bms_ch_total'],          // lista 1-elementowa → przyjęta
+    bms_discharge_entity: ['sensor.a_total', 'sensor.b_total'],  // 2 elementy → odmowa
+  }, PORT + 3);
+  const base3 = 'http://127.0.0.1:' + (PORT + 3);
+  const c3 = await (await fetch(base3 + '/api/config')).json();
+  t('S54 lista 1-elementowa w YAML przyjęta, nie zrzucona po cichu',
+    c3.bmsChargeEntity === 'sensor.bms_ch_total', JSON.stringify(c3));
+  t('S55 lista wieloelementowa odrzucona JAWNIE, z komunikatem',
+    c3.bmsDischargeEntity === '' && /podaj JEDNĄ encję, nie listę 2/.test(s3.log()),
+    JSON.stringify(c3) + ' | ' + s3.log().slice(-300));
+  const csv3 = await (await fetch(base3 + '/api/growatt/ha-stats.csv?start=2026-10-01&end=2026-10-02')).text();
+  t('S56 encja z listy 1-elementowej naprawdę pobiera dane',
+    /sensor\.bms_ch_total/.test(csv3), csv3.slice(0, 200));
   extraProcs.forEach(p => p.kill('SIGKILL'));
 
   console.log('\n=== Graceful shutdown (SIGTERM) ===');

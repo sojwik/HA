@@ -656,6 +656,237 @@
       .replace(/'/g, '&#39;');
   }
 
+
+  /* --------------------------------------------------------------------------
+   * batteryEconomicsMonth — F54: magazyn jako ROZSZERZENIE instalacji.
+   *
+   * POWÓD (audyt cz. 16). Dotąd zysk liczono jako
+   *     rozładowanie × jedna płaska stawka − ładowanie z sieci × ta sama stawka
+   * i to były WSZYSTKIE koszty. Dwa błędy:
+   *
+   * 1) Płaska stawka. Użytkownik ma trzy strefy zakupu (T1 0,90 / T2 1,50 /
+   *    T3 0,63 zł). Magazyn oddaje 39% energii w strefach droższych, więc
+   *    wycena całości po 0,63 zaniżała korzyść ~2,4×. Stawkę trzeba brać
+   *    z godziny ODDANIA, nie ładowania — na tym polega arbitraż.
+   *
+   * 2) Brak kosztu alternatywnego. Energia z PV włożona do magazynu nie
+   *    została wyeksportowana, więc nie zarobiła depozytu. To realny koszt
+   *    rozszerzenia. Bez niego 1307,58 zł wyglądało jak zysk przyrostowy,
+   *    a jest zyskiem BRUTTO.
+   *
+   * Utracony depozyt liczymy po RCE z GODZIN ŁADOWANIA, nie po średniej
+   * miesiąca: ładowanie wypada w południe, gdy RCE jest najniższe.
+   * Pomiar na 4 miesiącach: 478,71 zł po godzinach vs 569,10 zł po średniej
+   * (średnia zawyża o 24%; w kwietniu trzykrotnie).
+   *
+   * Noc zerujemy. Rejestr solar_energy_total jest skażony rozładowaniem
+   * (audyt cz. 14: w godzinach 23–02 przy rozładowaniu 0 mediana produkcji
+   * wynosi dokładnie 0,0000, ale przy rozładowaniu > 0 pokazuje ~0,72×DIS).
+   * W godzinach astronomicznie ciemnych produkcja MUSI być zerem, więc
+   * nie ufamy rejestrowi. Okno 22–04 jest ciemne cały rok na 51°N.
+   *
+   * @param {Array} hours  wiersze {date:'YYYY-MM-DD', hour:0..23,
+   *                               produkcja, ladowanie, rozladowanie}
+   * @param {Object} opts  {zoneRates, fallbackRate, zoneOf, rceOf,
+   *                        scaleCharge, scaleDischarge, depositMult,
+   *                        minCoverage}
+   * ------------------------------------------------------------------------*/
+  function batteryEconomicsMonth(hours, opts) {
+    const o = opts || {};
+    const zoneRates = o.zoneRates || {};
+    const fallback = (typeof o.fallbackRate === 'number' && isFinite(o.fallbackRate)
+                      && o.fallbackRate > 0) ? o.fallbackRate : null;
+    const zoneOf = typeof o.zoneOf === 'function' ? o.zoneOf : function () { return null; };
+    const rceOf = typeof o.rceOf === 'function' ? o.rceOf : function () { return null; };
+    const sc = (typeof o.scaleCharge === 'number' && isFinite(o.scaleCharge) && o.scaleCharge > 0)
+      ? o.scaleCharge : 1;
+    const sd = (typeof o.scaleDischarge === 'number' && isFinite(o.scaleDischarge) && o.scaleDischarge > 0)
+      ? o.scaleDischarge : 1;
+    const mult = (typeof o.depositMult === 'number' && isFinite(o.depositMult)) ? o.depositMult : 1.23;
+    const minCov = (typeof o.minCoverage === 'number' && isFinite(o.minCoverage)) ? o.minCoverage : 0.90;
+
+    let n = 0, zoneKnown = 0;
+    let charge = 0, discharge = 0, gridKwh = 0, pvChargeKwh = 0;
+    let dischargePln = 0, gridCostPln = 0, lostDepositPln = 0;
+    let pvChargeHours = 0, pvChargeHoursPriced = 0, pvChargeUnpriced = 0;
+
+    for (const h of (hours || [])) {
+      if (!h) continue;
+      const ch0 = Number(h.ladowanie), dis0 = Number(h.rozladowanie);
+      if (!isFinite(ch0) || !isFinite(dis0)) continue;
+      const hour = Number(h.hour);
+      if (!isFinite(hour)) continue;
+      n++;
+
+      const dark = hour >= 22 || hour < 4;
+      const pvRaw = Number(h.produkcja);
+      const pv = dark ? 0 : (isFinite(pvRaw) ? Math.max(0, pvRaw) : 0);
+      const ch = Math.max(0, ch0) * sc;
+      const dis = Math.max(0, dis0) * sd;
+      const grid = (pv <= 0.01 || dark) ? ch : 0;
+      const pvCh = ch - grid;
+
+      charge += ch; discharge += dis; gridKwh += grid; pvChargeKwh += pvCh;
+
+      const zone = zoneOf(h.date, hour);
+      let rate = (zone !== null && zone !== undefined
+                  && typeof zoneRates[zone] === 'number' && isFinite(zoneRates[zone])
+                  && zoneRates[zone] > 0) ? zoneRates[zone] : null;
+      if (rate !== null) zoneKnown++;
+      else rate = fallback;
+
+      if (rate !== null) {
+        dischargePln += dis * rate;
+        gridCostPln += grid * rate;
+      }
+      if (pvCh > 0.001) {
+        pvChargeHours++;
+        // Number(null) === 0, a nie NaN — brak ceny wyglądałby jak cena
+        // zerowa i koszt alternatywny zniknąłby po cichu (złapane przez M22).
+        const rceRaw = rceOf(h.date, hour);
+        const rce = (rceRaw === null || rceRaw === undefined || rceRaw === '')
+          ? NaN : Number(rceRaw);
+        if (isFinite(rce)) {
+          pvChargeHoursPriced++;
+          // Ujemne RCE nie pomniejsza depozytu (art. 40 ustawy o OZE),
+          // więc koszt alternatywny w takiej godzinie jest ZERO.
+          lostDepositPln += pvCh * Math.max(0, rce) / 1000 * mult;
+        } else {
+          pvChargeUnpriced += pvCh;
+        }
+      }
+    }
+
+    const zoneCoverage = n > 0 ? zoneKnown / n : 0;
+    const rceCoverage = pvChargeHours > 0 ? pvChargeHoursPriced / pvChargeHours : 1;
+    const grossPln = dischargePln - gridCostPln;
+    const incrementalPln = grossPln - lostDepositPln;
+    // Bez stawek strefowych nie ma wyceny. Bez RCE nie ma kosztu
+    // alternatywnego, więc NIE wolno podać liczby przyrostowej — wyglądałaby
+    // na lepszą niż jest, bo brakujący koszt byłby potraktowany jak zero.
+    const priced = n > 0 && zoneCoverage >= minCov;
+    const incrementalKnown = priced && (pvChargeKwh <= 0.5 || rceCoverage >= minCov);
+
+    return {
+      hours: n,
+      charge: round2(charge),
+      discharge: round2(discharge),
+      gridKwh: round2(gridKwh),
+      pvChargeKwh: round2(pvChargeKwh),
+      dischargePln: round2(dischargePln),
+      gridCostPln: round2(gridCostPln),
+      lostDepositPln: round2(lostDepositPln),
+      grossPln: round2(grossPln),
+      incrementalPln: incrementalKnown ? round2(incrementalPln) : null,
+      zoneCoverage: round2(zoneCoverage),
+      rceCoverage: round2(rceCoverage),
+      pvChargeUnpriced: round2(pvChargeUnpriced),
+      priced,
+      incrementalKnown,
+      reason: !priced
+        ? ('stawki strefowe dla ' + Math.round(zoneCoverage * 100) + '% godzin'
+           + ' — potrzeba ' + Math.round(minCov * 100) + '%')
+        : (!incrementalKnown
+          ? ('ceny RCE dla ' + Math.round(rceCoverage * 100) + '% godzin ładowania z PV'
+             + ' — koszt alternatywny niepełny')
+          : null),
+    };
+  }
+
+  /* --------------------------------------------------------------------------
+   * batteryAcDcFactors — współczynniki AC/DC mierzone z miesięcy, w których
+   * OBA źródła są zdrowe i mają pełne pokrycie. Nie wpisujemy ich z góry:
+   * falownik i BMS mają własne błędy skali.
+   *
+   * Na danych użytkownika (maj–sierpień 2026):
+   *   ładowanie   Growatt/BMS = 1,0096
+   *   rozładowanie Growatt/BMS = 0,9520
+   * ------------------------------------------------------------------------*/
+  function batteryAcDcFactors(months) {
+    let gc = 0, bc = 0, gd = 0, bd = 0, n = 0;
+    for (const m of (months || [])) {
+      if (!m) continue;
+      const a = Number(m.growattCharge), b = Number(m.bmsCharge);
+      const c = Number(m.growattDischarge), d = Number(m.bmsDischarge);
+      if (![a, b, c, d].every(function (x) { return isFinite(x) && x > 0; })) continue;
+      gc += a; bc += b; gd += c; bd += d; n++;
+    }
+    if (!n || bc <= 0 || bd <= 0) return { months: n, charge: 1, discharge: 1, measured: false };
+    return { months: n, charge: round2(gc / bc * 10000) / 10000,
+             discharge: round2(gd / bd * 10000) / 10000, measured: true };
+  }
+
+
+  /* --------------------------------------------------------------------------
+   * selfConsumptionMonth — F50/F51: autokonsumpcja z JEDNEGO zbioru godzin,
+   * wyceniana po strefie danej godziny, z eksportem z eLicznika.
+   *
+   * POWÓD (audyt cz. 15 i 16). Stara gałąź liczyła
+   *     autokonsumpcja = zużycieDomu − pobór
+   * i miała dwa błędy:
+   *
+   * 1) `load_load_energy_total` nie jest pomiarem. Tożsamość
+   *    LOAD = PV + IMP − EXP trzyma się w Mar–Cze w 100% (MAE 0,000),
+   *    czyli LOAD jest wyliczany. Wtedy LOAD − IMP = PV − EXP algebraicznie,
+   *    ale obie serie są filtrowane OSOBNO, więc wynik dostaje szum
+   *    50–110 kWh/mies. Sierpień–październik rozjeżdżały się mimo ZDROWEGO
+   *    licznika importu — to wada metody, nie usterka danych.
+   *
+   * 2) LOAD pomija baterię. Prawdziwe zużycie domu to
+   *    PV + IMP + rozładowanie − ładowanie − EXP, więc autokonsumpcja
+   *    w godzinie to PV + rozładowanie − ładowanie − EXP. Bez członów
+   *    bateryjnych energia oddana wieczorem nie była wyceniana w strefie
+   *    wieczornej, tylko w południowej — a to jest cały sens magazynu.
+   *
+   * Eksport brany z eLicznika (licznik rozliczeniowy), bo import Growatt
+   * był uszkodzony w Mar–Jul. Sam eksport Growatt zgadza się z eLicznikiem
+   * na 1,3% (3737,1 vs 3688,6 kWh w 7 mies.), ale eLicznik jest rozstrzygający.
+   *
+   * Noc 22–04 zeruje produkcję — rejestr jest skażony rozładowaniem.
+   * ------------------------------------------------------------------------*/
+  function selfConsumptionMonth(hours, opts) {
+    const o = opts || {};
+    const zoneRates = o.zoneRates || {};
+    const zoneOf = typeof o.zoneOf === 'function' ? o.zoneOf : function () { return null; };
+    const exportOf = typeof o.exportOf === 'function' ? o.exportOf : function () { return null; };
+    const sc = (typeof o.scaleCharge === 'number' && isFinite(o.scaleCharge) && o.scaleCharge > 0) ? o.scaleCharge : 1;
+    const sd = (typeof o.scaleDischarge === 'number' && isFinite(o.scaleDischarge) && o.scaleDischarge > 0) ? o.scaleDischarge : 1;
+    const minCov = (typeof o.minCoverage === 'number' && isFinite(o.minCoverage)) ? o.minCoverage : 0.90;
+
+    let n = 0, priced = 0, kwh = 0, pln = 0, expKwh = 0;
+    for (const h of (hours || [])) {
+      if (!h) continue;
+      const ch0 = Number(h.ladowanie), dis0 = Number(h.rozladowanie), pv0 = Number(h.produkcja);
+      const hour = Number(h.hour);
+      if (!isFinite(ch0) || !isFinite(dis0) || !isFinite(hour)) continue;
+      const exRaw = exportOf(h.date, hour);
+      // Brak eksportu z eLicznika → godzina nie wchodzi. Nie podstawiamy zera,
+      // bo zero eksportu zawyżyłoby autokonsumpcję o cały eksport.
+      if (exRaw === null || exRaw === undefined || exRaw === '') continue;
+      const ex = Number(exRaw);
+      if (!isFinite(ex)) continue;
+      n++;
+      const dark = hour >= 22 || hour < 4;
+      const pv = dark ? 0 : (isFinite(pv0) ? Math.max(0, pv0) : 0);
+      const ch = Math.max(0, ch0) * sc;
+      const dis = Math.max(0, dis0) * sd;
+      const self = pv + dis - ch - Math.max(0, ex);
+      kwh += self; expKwh += Math.max(0, ex);
+      const z = zoneOf(h.date, hour);
+      const rate = (z !== null && z !== undefined && typeof zoneRates[z] === 'number'
+                    && isFinite(zoneRates[z]) && zoneRates[z] > 0) ? zoneRates[z] : null;
+      if (rate !== null) { priced++; pln += self * rate; }
+    }
+    const coverage = n > 0 ? priced / n : 0;
+    const ok = n > 0 && coverage >= minCov;
+    return {
+      hours: n, kwh: round2(kwh), pln: ok ? round2(pln) : null,
+      exportKwh: round2(expKwh), zoneCoverage: round2(coverage), priced: ok,
+      reason: ok ? null : ('stawki strefowe dla ' + Math.round(coverage * 100)
+        + '% godzin z eksportem z eLicznika (potrzeba ' + Math.round(minCov * 100) + '%)'),
+    };
+  }
+
   function round2(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
 
   return {
@@ -675,6 +906,9 @@
     depositMultiplier,
     hourlyDepositValue,
     refundCap,
+    batteryEconomicsMonth,
+    batteryAcDcFactors,
+    selfConsumptionMonth,
     escapeHtml,
     round2,
   };

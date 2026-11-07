@@ -304,13 +304,23 @@ if (CSV) {
   t('C1 sierpień = 0 kWh (brak ładowania z sieci)', () => {
     assert.strictEqual(sandbox.estimateGridCharge('2026-08').kwh, 0);
   });
-  t('C2 wrzesień ≈ 62,5 kWh', () => {
+  // F52 (0.3.2): wykrywanie po oknie astronomicznej ciemności 22–04 oprócz
+  // zerowej produkcji. Rejestr PV jest skażony rozładowaniem, więc w nocy
+  // pokazywał fikcyjne kWh i ładowanie z sieci umykało. Wartości wzrosły
+  // z 62,5 → 64,0 i z 70,7 → 87,6 kWh. Obie potwierdzone NIEZALEŻNYM
+  // rachunkiem pythonowym na tym samym eksporcie (64,0 i 87,6).
+  t('C2 wrzesień ≈ 64,0 kWh (z oknem ciemności)', () => {
     const g = sandbox.estimateGridCharge('2026-09');
-    assert.ok(Math.abs(g.kwh - 62.5) < 0.5, 'otrzymano ' + g.kwh);
+    assert.ok(Math.abs(g.kwh - 64.0) < 0.5, 'otrzymano ' + g.kwh);
   });
-  t('C3 październik ≈ 70,7 kWh i większość w dzień', () => {
+  t('C3 październik ≈ 87,6 kWh (z oknem ciemności)', () => {
     const g = sandbox.estimateGridCharge('2026-10');
-    assert.ok(Math.abs(g.kwh - 70.7) < 0.5, 'otrzymano ' + g.kwh);
+    assert.ok(Math.abs(g.kwh - 87.6) < 0.5, 'otrzymano ' + g.kwh);
+  });
+  t('C5 okno ciemności wykrywa WIĘCEJ niż samo zero produkcji', () => {
+    // Bez F52 październik dawał 70,7. Przyrost musi być dodatni i istotny.
+    const g = sandbox.estimateGridCharge('2026-10');
+    assert.ok(g.kwh > 70.7 + 10, 'przyrost za mały: ' + g.kwh);
   });
   t('C4 wynik oznaczony jako szacunek', () => {
     assert.strictEqual(sandbox.estimateGridCharge('2026-10').estimated, true);
