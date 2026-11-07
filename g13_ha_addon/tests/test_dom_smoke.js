@@ -628,6 +628,72 @@ function serveDir(dir) {
     flatTxt.slice(0, 160) + ' | ' + JSON.stringify(flatCells));
   dFlat.window.close();
 
+
+  /* ===== F56: komunikat o odrzuconych godzinach ===== */
+  // Trzy odrzucone godziny importu. Licznik rozliczeniowy pokazuje w nich
+  // 1,75 + 1,76 + 0,00 = 3,51 kWh. Odrzucone delty to -153,6 kWh.
+  // Komunikat ma pokazywac 3,51 kWh i NIE wzywac do edycji historii HA.
+  function rejKv(withElicznik){
+    const keys = [
+      { role:'poborHa', date:'2026-04-05', hour:11 },
+      { role:'poborHa', date:'2026-04-06', hour:12 },
+      { role:'poborHa', date:'2026-04-07', hour:13 },
+    ];
+    const ledger = {
+      months: { '2026-04': { haLadowanie:311.8, haRozladowanie:296.2, haPvHours:696, haHours:696 } },
+      zoneRates: { T1:0.90, T2:1.50, T3:0.63 },
+      manualRatePlnKwh: 0.63,
+      bmsCheck: {}, haBatteryCheck: {},
+      haRejected: { '2026-04': {
+        total: 86, rejectedKwh: -153.6,
+        byRole: { poborHa: { count:86, kwh:-153.6, negative:86, overLimit:0 } },
+        keys: keys,
+      } },
+    };
+    const el = {};
+    if (withElicznik){
+      el['2026-04-05_11'] = { date:'2026-04-05', hour:11, poborPoZbil:1.75, oddaniePoZbil:0, strefa:'T1' };
+      el['2026-04-06_12'] = { date:'2026-04-06', hour:12, poborPoZbil:1.76, oddaniePoZbil:0, strefa:'T1' };
+      el['2026-04-07_13'] = { date:'2026-04-07', hour:13, poborPoZbil:0,    oddaniePoZbil:0, strefa:'T1' };
+    }
+    const kv = { 'monthly-ledger': JSON.stringify(ledger) };
+    if (withElicznik) kv['elicznik-hourly-2026-04'] = JSON.stringify(el);
+    return kv;
+  }
+  async function diagText(kv){
+    const d = await loadWithCache(null, kv, cfgBms, undefined, null);
+    d.window.document.getElementById('inputBatCost').value = '5000';
+    d.window.document.getElementById('inputBatCost')
+      .dispatchEvent(new d.window.Event('change', { bubbles: true }));
+    await new Promise(r => setTimeout(r, 300));
+    const el = d.window.document.getElementById('haDiagnostics');
+    const txt = el ? el.textContent : '';
+    // Mutacja MUT6 przeszła, gdy test sprawdzał tylko tekst panelu:
+    // podsumowanie osobno zawierała poprawną kwotę, więc podmiana KOMÓRKI
+    // tabeli na odrzucone kWh nie była wykryta. Sprawdzamy komórkę wprost.
+    const tr = el ? el.querySelector('table tbody tr') : null;
+    const cells = tr ? Array.from(tr.querySelectorAll('td')).map(x => x.textContent.trim()) : [];
+    d.window.close();
+    return { txt: txt, cells: cells };
+  }
+
+  const dK = await diagText(rejKv(true));
+  t('D52 panel pokazuje REALNA energie z eLicznika (3,51 kWh), nie odrzucone -153,6',
+    /3,51/.test(dK.txt) && /nie ma potrzeby edycji historii w HA/i.test(dK.txt),
+    dK.txt.slice(0, 260));
+  t('D52b KOMORKA tabeli = 3,51 kWh, a nie -153,60 (mutacja MUT6)',
+    dK.cells[3] === '3,51 kWh' && dK.cells[2] === '-153,6',
+    JSON.stringify(dK.cells));
+  t('D53 stare zalecenie "Adjust sum" zniknęło z panelu',
+    !/Adjust sum/i.test(dK.txt), dK.txt.slice(0, 260));
+  const dU = await diagText(rejKv(false));
+  t('D54 bez eLicznika: "nieznane" + prosba o wgranie, wciaz bez "Adjust sum"',
+    /nieznane/.test(dU.txt) && /Wgraj eLicznik/i.test(dU.txt)
+      && !/Adjust sum/i.test(dU.txt),
+    dU.txt.slice(0, 260));
+  t('D54b bez eLicznika KOMORKA = "nieznane", nie zero',
+    dU.cells[3] === 'nieznane', JSON.stringify(dU.cells));
+
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
   if (errors.length) console.log('\nZebrane błędy (pierwsze 5):\n' + errors.slice(0, 5).join('\n'));

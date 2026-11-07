@@ -704,6 +704,11 @@ function formatPLN(n){
 function formatKwh1(n){
   return (n||0).toLocaleString('pl-PL',{minimumFractionDigits:1,maximumFractionDigits:1});
 }
+// F56: realna energia w odrzuconych godzinach bywa rzedu 0,09 kWh/h,
+// wiec jedno miejsce po przecinku zamienialoby ja w "0,0".
+function formatKwh2(n){
+  return (n||0).toLocaleString('pl-PL',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
 function formatMonthLabel(key){
   const parts = key.split('-');
   const idx = parseInt(parts[1],10) - 1;
@@ -1425,7 +1430,21 @@ function parseHaStatisticsCsv(rows, sourceLabel){
     summary.overLimitSamples.slice(0,10).forEach(function(s){
       log('  ' + new Date(s.ts).toLocaleString('pl-PL') + '  ' + s.role + '  ' + s.delta.toFixed(1) + ' kWh — ' + s.reason, 'warn');
     });
-    log('  Te godziny NIE weszły do sum. Napraw historię w HA: Narzędzia deweloperskie → Statystyki → „Adjust sum”.', 'warn');
+    // F56: bylo tu bezwarunkowe "Napraw historie w HA: Adjust sum".
+    // Dla 188 h importu realna energia to 4,43 kWh - zalecenie bylo
+    // nieproporcjonalne i prowadzilo do niepotrzebnej edycji historii.
+    const imp = V.rejectionImpact(summary.rejectedKeys, state.hourlyElicznik);
+    if (imp.known){
+      log('  Według licznika rozliczeniowego (eLicznik) w odrzuconych godzinach było '
+          + imp.kwh.toFixed(2) + ' kWh realnej energii (' + imp.matched + ' z ' + imp.mapped
+          + ' h potwierdzonych). Pominięcie jest poprawne — NIE ma potrzeby edycji historii w HA.', 'info');
+    } else if (imp.mapped > 0){
+      log('  Odrzucone godziny dotyczą importu/eksportu, ale ' + (imp.reason || 'brak pokrycia')
+          + '. Wgraj eLicznik za te miesiące, żeby zobaczyć, ile realnej energii pominięto.', 'warn');
+    } else {
+      log('  Te godziny NIE weszły do sum. ' + (imp.reason || 'brak danych do weryfikacji')
+          + ' — nie ma ich czym potwierdzić.', 'warn');
+    }
   } else {
     log(sourceLabel + ': przyjęto wszystkie ' + accepted + ' godzinowych wpisów — brak wartości fizycznie niemożliwych.', 'success');
   }
@@ -1561,6 +1580,7 @@ function renderHaDiagnostics(){
   html += '<strong style="color:#f87171;">Wykryto problemy w danych z Home Assistant</strong>';
 
   let totalRej = 0;
+  let impKnown = 0, impHours = 0;
   const rows = [];
   months.forEach(function(mk){
     const r = state.haRejected[mk];
@@ -1571,17 +1591,37 @@ function renderHaDiagnostics(){
       const b = r.byRole[role];
       parts.push(V.escapeHtml(role) + ': ' + b.count + ' h');
     }
+    // F56: ile realnej energii bylo w tych godzinach wg licznika rozliczeniowego.
+    const imp = V.rejectionImpact(r.keys, state.hourlyElicznik);
+    if (imp.known){ impKnown += imp.kwh; impHours += imp.matched; }
+    const impCell = imp.known
+      ? (formatKwh2(imp.kwh) + ' kWh')
+      : ('<span class="tag-warn" title="' + V.escapeHtml(imp.reason || '') + '">nieznane</span>');
     rows.push('<tr><td>' + V.escapeHtml(formatMonthLabel(mk)) + '</td><td class="num">'
       + r.total + '</td><td class="num">' + formatKwh1(r.rejectedKwh)
+      + '</td><td class="num">' + impCell
       + '</td><td>' + parts.join(', ') + '</td></tr>');
   });
 
   if (rows.length){
+    // F56: opis mowi, ile realnie pominięto, zamiast wzywac do edycji HA.
     html += '<p class="hint" style="margin:.5rem 0;">Odrzucono ' + totalRej
-      + ' godzin jako fizycznie niemożliwych. Nie weszły do sum miesięcznych. '
-      + 'Napraw historię: Narzędzia deweloperskie → Statystyki → „Adjust sum”.</p>';
+      + ' godzin jako fizycznie niemożliwych (najczęściej ujemne delty chorego licznika). '
+      + 'Nie weszły do sum miesięcznych.';
+    if (impHours > 0){
+      html += ' Według licznika rozliczeniowego w <strong>' + impHours
+        + '</strong> z nich było łącznie <strong>' + formatKwh2(impKnown)
+        + ' kWh</strong> realnej energii. Pominięcie jest poprawne i tyle właśnie kosztuje '
+        + '— <strong>nie ma potrzeby edycji historii w HA</strong>.';
+    } else {
+      html += ' Wgraj eLicznik za te miesiące, żeby zobaczyć, ile realnej energii '
+        + 'pominięto — bez tego nie wiadomo, czy to istotne.';
+    }
+    html += '</p>';
     html += '<table style="width:100%;font-size:.85rem;"><thead><tr><th>Miesiąc</th>'
-      + '<th>Odrzucone h</th><th>Odrzucone kWh</th><th>Per licznik</th></tr></thead><tbody>'
+      + '<th>Odrzucone h</th><th>Odrzucone kWh</th>'
+      + '<th title="Import/eksport w tych godzinach według licznika rozliczeniowego Tauron. To realna energia, której pominięcie kosztuje.">Realnie wg eLicznika</th>'
+      + '<th>Per licznik</th></tr></thead><tbody>'
       + rows.join('') + '</tbody></table>';
   }
 
@@ -1657,7 +1697,9 @@ async function handleHaStatsFiles(fileList){
         }
         // F31: było `= parsed.rejected` — jeden globalny summary dla każdego
         // miesiąca. Nagłówek sumował to 9 razy (192 h -> 1728 h).
-        state.haRejected[mk] = rejByMonth[mk] || {total:0, rejectedKwh:0, byRole:{}};
+        // F56: klucze godzin zostaja w stanie, bo eLicznik moze przyjsc
+        // PO imporcie HA. Wplyw liczymy przy renderowaniu, nie tutaj.
+        state.haRejected[mk] = rejByMonth[mk] || {total:0, rejectedKwh:0, byRole:{}, keys:[]};
         if (parsed.bms && parsed.bms[mk]) state.bmsCheck[mk] = parsed.bms[mk];
         // F48: trwałe, bo haHourly NIE jest zapisywane w KV — po restarcie
         // strażnik musiałby uznać każdy miesiąc za pozbawiony danych PV.
