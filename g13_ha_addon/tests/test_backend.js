@@ -505,6 +505,95 @@ t('M31 eksport ujemny nie podnosi autokonsumpcji', () => {
   assert.strictEqual(r.kwh, 5, 'max(0, eksport) — ujemny nie dodaje');
 });
 
+
+/* ===== F56: realna energia w odrzuconych godzinach ===== */
+const RI = V.rejectionImpact;
+// Klucze odrzuconych godzin w czasie LOKALNYM, tak jak eLicznik.
+function rk(role, date, hour){ return { role, date, hour }; }
+function elRow(imp, exp){ return { poborPoZbil: imp, oddaniePoZbil: exp }; }
+
+t('M36 rejectionImpact odtwarza zmierzona energie, nie sume odrzuconych delt', () => {
+  // Odrzucone delty to -153,6 kWh; licznik rozliczeniowy pokazuje 3,51 kWh.
+  // Komunikat ma pokazywac 3,51, bo tyle realnie pominięto.
+  const keys = [rk('poborHa','2026-04-05',11), rk('poborHa','2026-04-06',12)];
+  const el = { '2026-04-05_11': elRow(1.75,0), '2026-04-06_12': elRow(1.76,0) };
+  const r = RI(keys, el);
+  assert.strictEqual(r.known, true);
+  assert.strictEqual(r.matched, 2);
+  assert.strictEqual(r.kwh, 3.51);
+});
+
+t('M37 brak eLicznika → known=false, nie "zero energii"', () => {
+  const r = RI([rk('poborHa','2026-04-05',11)], {});
+  assert.strictEqual(r.known, false, 'brak pomiaru nie moze wygladac jak zero');
+  assert.strictEqual(r.matched, 0);
+  assert.ok(/pokrywa 0%/.test(r.reason), r.reason);
+});
+
+t('M38 null/pusty pomiar nie wchodzi jako zero (Number(null) === 0)', () => {
+  const keys = [rk('poborHa','2026-04-05',11), rk('poborHa','2026-04-05',12),
+                rk('poborHa','2026-04-05',13)];
+  const el = { '2026-04-05_11': elRow(2.5,0),
+               '2026-04-05_12': elRow(null,0),
+               '2026-04-05_13': elRow('',0) };
+  const r = RI(keys, el);
+  assert.strictEqual(r.matched, 1, 'null i "" to brak pomiaru, nie 0 kWh');
+  assert.strictEqual(r.kwh, 2.5);
+  assert.strictEqual(r.known, false, 'pokrycie 1/3 < 90%');
+});
+
+t('M39 produkcja i bateria nie maja odpowiednika w eLiczniku', () => {
+  const keys = [rk('produkcja','2026-07-01',12), rk('ladowanie','2026-07-01',13)];
+  const r = RI(keys, { '2026-07-01_12': elRow(9,9) });
+  assert.strictEqual(r.mapped, 0, 'nie wolno weryfikowac PV licznikiem sieci');
+  assert.strictEqual(r.known, false);
+  assert.ok(/nie maja odpowiednika/.test(r.reason), r.reason);
+});
+
+t('M40 oddanieHa czyta eksport, nie import', () => {
+  const r = RI([rk('oddanieHa','2026-07-01',12)], { '2026-07-01_12': elRow(7.5, 2.25) });
+  assert.strictEqual(r.kwh, 2.25, 'pomylona kolumna zawyzyloby wynik 3×');
+  assert.strictEqual(r.byRole.oddanieHa.kwh, 2.25);
+});
+
+t('M41 pokrycie mieszane: czesc godzin bez pomiaru obniża known', () => {
+  const keys = []; const el = {};
+  for (let h = 0; h < 10; h++){
+    keys.push(rk('poborHa','2026-04-05',h));
+    if (h < 8) el['2026-04-05_' + String(h).padStart(2,'0')] = elRow(0.1, 0);
+  }
+  const r = RI(keys, el);
+  assert.strictEqual(r.matched, 8);
+  assert.strictEqual(r.coverage, 0.8);
+  assert.strictEqual(r.known, false, '80% < 90% — nie wolno podawac jako pewne');
+  assert.strictEqual(r.kwh, 0.8);
+});
+
+t('M42 createRejectionLog zapisuje klucze w czasie LOKALNYM (nie UTC)', () => {
+  const rej = V.createRejectionLog();
+  const cfg = V.resolveConfig();
+  // 2026-07-01 00:30 lokalnie = 2026-06-30 22:30 UTC. Klucz musi byc 07-01_00.
+  const ms = Date.UTC(2026, 5, 30, 22, 30);
+  const v = V.acceptDelta('poborHa', -1.5, null, ms, cfg);
+  assert.strictEqual(v.ok, false);
+  rej.add('poborHa', ms, -1.5, v);
+  const s = rej.summary();
+  assert.strictEqual(s.rejectedKeys.length, 1);
+  assert.strictEqual(s.rejectedKeys[0].date, '2026-07-01', 'UTC daloby 06-30');
+  assert.strictEqual(s.rejectedKeys[0].hour, 0);
+  assert.ok(s.byMonth['2026-07'], 'miesiac tez lokalny');
+  assert.strictEqual(s.byMonth['2026-07'].keys.length, 1);
+});
+
+t('M43 pusty log → known=false bez wyjatku', () => {
+  const r = RI([], {});
+  assert.strictEqual(r.hours, 0);
+  assert.strictEqual(r.known, false);
+  assert.strictEqual(r.kwh, 0);
+  const r2 = RI(null, null);
+  assert.strictEqual(r2.known, false, 'null nie moze wywrócić renderu');
+});
+
 // sprzątanie
 fs.rmSync(TMP, { recursive: true, force: true });
 

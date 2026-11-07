@@ -144,6 +144,11 @@
     // więc nie mogą zostać wyparte przez masę ujemnych delt (kwiecień: 86 h).
     const overLimitSamples = [];
     const negativeSamples = [];
+    // F56: klucze godzin w czasie LOKALNYM, zeby dalo sie je zestawic
+    // z eLicznikiem. Bez tego komunikat mogl tylko straszyc, nie mierzyc.
+    // Cap chroni KV przed pathologicalnym eksportem (dziesiatki tysiecy h).
+    const rejectedKeys = [];
+    const KEY_CAP = 20000;
     let total = 0;
     let rejectedKwh = 0;
 
@@ -163,6 +168,10 @@
         bm.byRole[role].count++;
         bm.byRole[role].kwh += delta;
         const rec = { role, ts, delta, reason: verdict.reason };
+        if (rejectedKeys.length < KEY_CAP){
+          const lh = localHourLabel(ts);
+          rejectedKeys.push({ role: role, date: lh.date, hour: lh.hour });
+        }
         if (verdict.reason === 'ujemna delta') {
           byRole[role].negative++;
           bm.byRole[role].negative++;
@@ -182,11 +191,15 @@
           byMonth: Object.keys(byMonth).reduce(function(acc, k){
             acc[k] = { total: byMonth[k].total,
                        rejectedKwh: Math.round(byMonth[k].rejectedKwh * 100) / 100,
-                       byRole: byMonth[k].byRole };
+                       byRole: byMonth[k].byRole,
+                       keys: rejectedKeys.filter(function(r){
+                         return r.date.slice(0,7) === k;
+                       }) };
             return acc;
           }, {}),
           overLimitSamples,
           negativeSamples,
+          rejectedKeys,
           samples: overLimitSamples.concat(negativeSamples),
         };
       },
@@ -887,6 +900,76 @@
     };
   }
 
+  /* --------------------------------------------------------------------------
+   * F56: ile REALNEJ energii bylo w odrzuconych godzinach.
+   *
+   * Dlaczego to istnieje. Do 0.3.2 komunikat mowil "Napraw historie w HA:
+   * Adjust sum" dla kazdego odrzucenia. To byla ZLA RADA: audyt cz. 15
+   * wykazal, ze 188 odrzuconych godzin importu zawiera 4,43 kWh realnego
+   * importu (potwierdzone licznikiem rozliczeniowym), czyli okolo 4 zl.
+   * Uzytkownik szykowal sie do edycji 188 godzin historii, zeby odzyskac
+   * 4 kWh. Aplikacja ma eLicznik wczytany, wiec MOZE policzyć stawke
+   * zamiast straszyc.
+   *
+   * Uwaga na role: eLicznik mierzy tylko import i eksport. Produkcji
+   * ani baterii nie mierzy, wiec tych odrzucen NIE DA SIE zweryfikowac
+   * i nie wolno ich wliczac do "pokrycia" - inaczej brak danych wygladalby
+   * jak zero energii.
+   * ------------------------------------------------------------------------*/
+  function rejectionImpact(rejectedKeys, elHourly, opts) {
+    const o = opts || {};
+    const minCoverage = (o.minCoverage == null) ? 0.90 : o.minCoverage;
+    const FIELD = { poborHa: 'poborPoZbil', oddanieHa: 'oddaniePoZbil' };
+    const list = Array.isArray(rejectedKeys) ? rejectedKeys : [];
+    const byRole = {};
+    let mapped = 0, matched = 0, kwh = 0;
+
+    for (let i = 0; i < list.length; i++){
+      const rec = list[i];
+      if (!rec) continue;
+      const field = FIELD[rec.role];
+      if (!field) continue;              // rola bez odpowiednika w eLiczniku
+      mapped++;
+      if (!byRole[rec.role]) byRole[rec.role] = { hours: 0, matched: 0, kwh: 0 };
+      const b = byRole[rec.role];
+      b.hours++;
+      const key = rec.date + '_' + String(rec.hour).padStart(2, '0');
+      const row = elHourly ? elHourly[key] : null;
+      if (!row) continue;
+      const raw = row[field];
+      // Number(null) === 0, nie NaN - brak pomiaru NIE moze wejsc jako zero.
+      if (raw == null || raw === '') continue;
+      const v = Number(raw);
+      if (!isFinite(v)) continue;
+      b.matched++; matched++;
+      b.kwh += v; kwh += v;
+    }
+
+    for (const r in byRole) byRole[r].kwh = round2(byRole[r].kwh);
+    const coverage = mapped ? matched / mapped : null;
+    let known = false, reason = null;
+    if (!list.length){
+      reason = 'brak odrzuconych godzin';
+    } else if (!mapped){
+      reason = 'odrzucone rejestry nie maja odpowiednika w eLiczniku (produkcja, bateria)';
+    } else if (coverage < minCoverage){
+      reason = 'eLicznik pokrywa ' + Math.round(coverage * 100) + '% odrzuconych godzin (potrzeba '
+             + Math.round(minCoverage * 100) + '%)';
+    } else {
+      known = true;
+    }
+    return {
+      hours: list.length,
+      mapped: mapped,
+      matched: matched,
+      kwh: round2(kwh),
+      coverage: coverage,
+      known: known,
+      reason: reason,
+      byRole: byRole,
+    };
+  }
+
   function round2(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
 
   return {
@@ -909,6 +992,7 @@
     batteryEconomicsMonth,
     batteryAcDcFactors,
     selfConsumptionMonth,
+    rejectionImpact,
     escapeHtml,
     round2,
   };
