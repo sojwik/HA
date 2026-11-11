@@ -970,6 +970,210 @@
     };
   }
 
+  /* --------------------------------------------------------------------------
+   * F58 — ROZBUDOWA: dodatkowy magazyn na RESZTKOWYCH przepływach eLicznika.
+   *
+   * Bazą są import/eksport PO pracy istniejącej instalacji. Nie czytamy HA/BMS
+   * ani pojemności pierwszej baterii. Nie dodajemy jej korzyści drugi raz.
+   * capacityKwh = dodatkowa pojemność użytkowa wewnątrz baterii; efficiency
+   * = sprawność całego cyklu AC->AC. Przy braku osobnych sprawności zakładamy
+   * symetryczny podział sqrt(eta) na ładowanie/rozładowanie (jawny w UI).
+   * chargeKw/dischargeKw = dostępna DODATKOWA moc AC, null = bez limitu.
+   *
+   * Stan zaczyna od 0, przechodzi między dniami/miesiącami. Luka lub godzina
+   * niejednoznaczna przerywa odcinek: energii nie teleportujemy przez brak
+   * pomiaru. Odrzucony SOC zostaje jawnie w bilansie, nie staje się zyskiem.
+   * Pieniądze wymagają cen dla 100% ZMIENIONYCH przepływów. Brak != zero.
+   * Funkcja nie mutuje wejścia. Zaokrąglenia dopiero w UI, nigdy w pętli.
+   * ------------------------------------------------------------------------*/
+  function simulateAdditionalBattery(hours, opts) {
+    const o = opts || {};
+    const EPS = 1e-9, HOUR = 3600000;
+    function number(v) {
+      if (v === null || v === undefined || typeof v === 'boolean'
+          || (typeof v === 'string' && v.trim() === '')) return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    }
+    function dateOk(d) {
+      return typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)
+        && Number.isFinite(Date.parse(d + 'T00:00:00Z'))
+        && new Date(d + 'T00:00:00Z').toISOString().slice(0, 10) === d;
+    }
+    function limit(v) { return v === null || v === undefined || v === '' ? Infinity : number(v); }
+    const cap = number(o.capacityKwh);
+    const eta = o.efficiency === undefined ? 0.90 : number(o.efficiency);
+    const chargeKw = limit(o.chargeKw), dischargeKw = limit(o.dischargeKw);
+    const startDate = o.startDate || null, endDate = o.endDate || null;
+    const out = { valid: false, reason: '', months: {}, total: null, hourly: [],
+      capacityKwh: cap, efficiency: eta,
+      chargeKw: chargeKw, dischargeKw: dischargeKw,
+      gapCount: 0, gapHours: 0, invalidRows: 0, duplicateKeys: 0,
+      ambiguousHours: 0, dstNeutralKeys: 0, dstImportKeys: 0, firstDate: null, lastDate: null,
+      complete: false, annualNetPln: null };
+    if (cap === null || cap < 0 || cap > 10000) {
+      out.reason = 'Wpisz dodatkową pojemność użytkową od 0 do 10000 kWh.'; return out;
+    }
+    if (eta === null || eta <= 0 || eta > 1) {
+      out.reason = 'Sprawność cyklu musi być większa od 0 i nie większa niż 100%.'; return out;
+    }
+    if (chargeKw === null || dischargeKw === null || chargeKw < 0 || dischargeKw < 0) {
+      out.reason = 'Limit mocy musi być nieujemny. Puste pole oznacza brak limitu; 0 blokuje kierunek.'; return out;
+    }
+    if ((startDate && !dateOk(startDate)) || (endDate && !dateOk(endDate))
+        || (startDate && endDate && startDate > endDate)) {
+      out.reason = 'Nieprawidłowy zakres dat symulacji.'; return out;
+    }
+    out.valid = true;
+    const etaC = Math.sqrt(eta), etaD = Math.sqrt(eta);
+    function bucket(key) {
+      return { key: key, hours: 0, sourceKeys: 0,
+        oldImportKwh: 0, newImportKwh: 0, oldExportKwh: 0, newExportKwh: 0,
+        chargeKwh: 0, dischargeKwh: 0, lossKwh: 0,
+        startSocKwh: 0, endSocKwh: 0, discardedKwh: 0,
+        unpricedChargeKwh: 0, unpricedDischargeKwh: 0,
+        savingsValue: 0, lostValue: 0, badHours: 0, gapHours: 0 };
+    }
+    const total = out.total = bucket('SUMA');
+    let soc = 0, prevEnd = null;
+    function add(m, k, v) { m[k] += v; total[k] += v; }
+    function cut(m) { add(m, 'discardedKwh', soc); soc = 0; }
+
+    // Godzina lokalna -> przedział UTC. Wiosenne 01->03 jest ciągłe.
+    // Jesienne 02:00 ma DWIE możliwe godziny. W obecnym formacie eLicznika
+    // są zsumowane pod jednym kluczem: nie zgadujemy kolejności i ceny.
+    // Wyjątki bez zgadywania: oba przepływy zero albo sam import w stałej
+    // strefie, gdy moc nie wiąże (patrz dstPowerUnknown). Czas = dwie godziny.
+    function interval(row) {
+      const hh = number(row.hour);
+      if (!dateOk(row.date) || hh === null || !Number.isInteger(hh) || hh < 0 || hh > 23) return null;
+      const naive = Date.parse(row.date + 'T' + String(hh).padStart(2, '0') + ':00:00Z');
+      const candidates = [];
+      [2, 1].forEach(function(offset) {
+        const ts = naive - offset * HOUR;
+        const lab = localHourLabel(ts);
+        if (lab.date === row.date && lab.hour === hh) candidates.push(ts);
+      });
+      if (!candidates.length) return null;
+      return { start: candidates[0], end: candidates[candidates.length - 1] + HOUR,
+        duration: candidates.length, ambiguous: candidates.length > 1,
+        date: row.date, hour: hh, key: row.date + '_' + String(hh).padStart(2, '0') };
+    }
+    const grouped = new Map();
+    (Array.isArray(hours) ? hours : []).forEach(function(row) {
+      if (!row || !dateOk(row.date)) { out.invalidRows++; return; }
+      if ((startDate && row.date < startDate) || (endDate && row.date > endDate)) return;
+      const iv = interval(row);
+      if (!iv) { out.invalidRows++; return; }
+      if (grouped.has(iv.key)) {
+        grouped.get(iv.key).duplicate = true; out.duplicateKeys++;
+      } else grouped.set(iv.key, { row: row, iv: iv, duplicate: false });
+    });
+    const records = Array.from(grouped.values()).sort(function(a, b) { return a.iv.start - b.iv.start; });
+    records.forEach(function(rec) {
+      const r = rec.row, iv = rec.iv, mk = iv.date.slice(0, 7);
+      if (!out.months[mk]) {
+        out.months[mk] = bucket(mk);
+        out.months[mk].startSocKwh = soc;
+      }
+      const m = out.months[mk];
+      if (!out.firstDate) out.firstDate = iv.date;
+      out.lastDate = iv.date;
+      if (prevEnd !== null && iv.start > prevEnd) {
+        const gap = (iv.start - prevEnd) / HOUR;
+        out.gapCount++; out.gapHours += gap; add(m, 'gapHours', gap);
+        cut(m);
+      }
+      prevEnd = iv.end;
+      const imp = r.hasImport === false ? null : number(r.poborPoZbil);
+      const exp = r.hasExport === false ? null : number(r.oddaniePoZbil);
+      const energyOk = imp !== null && exp !== null && imp >= 0 && exp >= 0;
+      // Przy samym imporcie obie jesienne godziny mają tę samą strefę G13.
+      // Bez ładowania kolejność poboru nie zmienia końcowego SOC ani kwoty.
+      // Limit nie może wiązać: cała suma mieści się w limicie JEDNEJ godziny
+      // (albo moc nieograniczona / rozładowanie zablokowane / SOC pusty).
+      // Eksport wymaga dwóch cen RCE, więc go nie rozstrzygamy z agregatu.
+      const dstPowerUnknown = iv.ambiguous && imp > EPS && soc > EPS
+        && dischargeKw > 0 && imp > dischargeKw + EPS;
+      const ambiguous = cap > 0 && energyOk && ((imp > EPS && exp > EPS)
+        || (iv.ambiguous && exp > EPS) || dstPowerUnknown);
+      if (energyOk && !rec.duplicate) {
+        add(m, 'oldImportKwh', imp); add(m, 'oldExportKwh', exp);
+      }
+      if (!energyOk || ambiguous || rec.duplicate) {
+        add(m, 'badHours', iv.duration);
+        if (ambiguous) out.ambiguousHours += iv.duration;
+        // Brak modelowania tej godziny: bazowe przepływy zostają niezmienione,
+        // lecz pełny wynik finansowy ma być NIEZNANY, nie fałszywe zero.
+        if (energyOk && !rec.duplicate) {
+          add(m, 'newImportKwh', imp); add(m, 'newExportKwh', exp);
+        }
+        cut(m); m.endSocKwh = soc;
+        return;
+      }
+      if (iv.ambiguous) {
+        if (imp === 0 && exp === 0) out.dstNeutralKeys++;
+        else if (imp > 0 && exp === 0) out.dstImportKeys++;
+      }
+      add(m, 'hours', iv.duration); add(m, 'sourceKeys', 1);
+      let charged = 0, discharged = 0;
+      if (exp > 0) {
+        charged = Math.max(0, Math.min(exp, (cap - soc) / etaC, chargeKw * iv.duration));
+        soc += charged * etaC;
+      } else if (imp > 0) {
+        discharged = Math.max(0, Math.min(imp, soc * etaD, dischargeKw * iv.duration));
+        soc -= discharged / etaD;
+      }
+      if (Math.abs(soc) < 1e-12) soc = 0;
+      const loss = charged * (1 - etaC) + discharged * (1 / etaD - 1);
+      add(m, 'chargeKwh', charged); add(m, 'dischargeKwh', discharged);
+      add(m, 'lossKwh', loss);
+      add(m, 'newExportKwh', exp - charged); add(m, 'newImportKwh', imp - discharged);
+      let saved = 0, lost = 0;
+      if (discharged > EPS) {
+        const rate = number(typeof o.rateOf === 'function' ? o.rateOf(iv.date, iv.hour, r) : null);
+        if (rate === null || rate < 0) { add(m, 'unpricedDischargeKwh', discharged); saved = null; }
+        else { saved = discharged * rate; add(m, 'savingsValue', saved); }
+      }
+      if (charged > EPS) {
+        const rce = number(typeof o.rceOf === 'function' ? o.rceOf(iv.date, iv.hour, r) : null);
+        if (rce === null) { add(m, 'unpricedChargeKwh', charged); lost = null; }
+        else { lost = hourlyDepositValue(charged, rce, mk); add(m, 'lostValue', lost); }
+      }
+      m.endSocKwh = soc;
+      if (o.includeHourly) out.hourly.push({ date: iv.date, hour: iv.hour, hours: iv.duration,
+        oldImportKwh: imp, newImportKwh: imp - discharged,
+        oldExportKwh: exp, newExportKwh: exp - charged,
+        chargeKwh: charged, dischargeKwh: discharged, socKwh: soc,
+        lossKwh: loss, purchaseSavingsPln: saved, lostDepositPln: lost });
+    });
+    total.endSocKwh = soc;
+    function finish(m, globalBad) {
+      const usable = m.hours > 0 && m.badHours === 0 && !globalBad;
+      m.savingsKnown = usable && m.unpricedDischargeKwh <= EPS;
+      m.lostKnown = usable && m.unpricedChargeKwh <= EPS;
+      m.purchaseSavingsPln = m.savingsKnown ? m.savingsValue : null;
+      m.lostDepositPln = m.lostKnown ? m.lostValue : null;
+      m.netKnown = m.savingsKnown && m.lostKnown;
+      m.netPln = m.netKnown ? m.savingsValue - m.lostValue : null;
+      m.balanceErrorKwh = m.startSocKwh + m.chargeKwh - m.dischargeKwh
+        - m.lossKwh - m.endSocKwh - m.discardedKwh;
+    }
+    Object.keys(out.months).forEach(function(mk) { finish(out.months[mk], false); });
+    finish(total, out.invalidRows > 0);
+    out.complete = total.hours > 0 && total.badHours === 0 && out.invalidRows === 0 && out.gapCount === 0;
+    // Wyłącznie opisane przeliczenie tempa, nie prognoza. Nie annualizujemy
+    // krótkiego wycinka (<30 dni), dziur ani niepełnej wyceny.
+    if (out.complete && total.netKnown && total.hours >= 720) {
+      out.annualNetPln = total.netPln * 8760 / total.hours;
+    }
+    if (!total.hours) out.reason = 'Brak jednoznacznych godzin eLicznika w wybranym okresie.';
+    else if (out.invalidRows || total.badHours) out.reason = 'Niepełny model: błędne, podwójne lub niejednoznaczne godziny. Pełny wynik jest nieznany.';
+    else if (!total.netKnown) out.reason = 'Brak stawek G13 lub RCE dla części zmienionych przepływów. Nie wyceniam braków jako zera.';
+    else if (out.gapCount) out.reason = 'Są luki: porównano tylko dostępne odcinki, każdy od pustego dodatkowego magazynu. Bez przeliczenia na rok.';
+    return out;
+  }
+
   function round2(n) { return Math.round((n + Number.EPSILON) * 100) / 100; }
 
   return {
@@ -993,6 +1197,7 @@
     batteryAcDcFactors,
     selfConsumptionMonth,
     rejectionImpact,
+    simulateAdditionalBattery,
     escapeHtml,
     round2,
   };

@@ -438,14 +438,12 @@
 
   <div id="tab-magazyn" class="tab-panel" hidden>
 
-  <section class="panel" style="margin-bottom:1.25rem; border-color:var(--rust);">
-    <h2 style="color:var(--rust-soft);">⚠ Jeśli już masz zainstalowany magazyn</h2>
-    <p class="hint" style="margin:0;">Ta symulacja liczy scenariusz „dodajesz magazyn do systemu, który go nie ma" — zakłada, że Pobór/Oddanie z eLicznika to dane BEZ baterii. Jeśli magazyn już fizycznie działa, te dane już są jego efektem, więc liczby poniżej nie opisują Twojej rzeczywistej sytuacji i mogą być mylące. Przydatne dopiero gdy masz osobne dane ładowania/rozładowania albo osobny pomiar zużycia domu (nie tylko przepływ przez licznik sieciowy).</p>
-  </section>
-
-  <section class="panel" style="margin-bottom:1.25rem; border-color:var(--rust);">
-    <h2 style="color:var(--rust-soft);">⚠ Symulacja poniżej vs. Twój prawdziwy magazyn</h2>
-    <p class="hint" style="margin:0;">Sekcja „Symulacja hipotetyczna" niżej liczy scenariusz „dodajesz magazyn do systemu, który go nie ma" — nie pasuje do Twojej sytuacji, skoro magazyn już działa. Jeśli wgrałeś dane z Home Assistant (zakładka Analiza), zobacz sekcję „Rzeczywista wydajność magazynu" poniżej — to prawdziwe liczby, nie hipoteza.</p>
+  <section class="panel" style="margin-bottom:1.25rem;">
+    <h2>Obecny magazyn i jego rozbudowa — dwa osobne rachunki</h2>
+    <p class="hint" style="margin:0;">Pierwsza sekcja liczy pracę <strong>obecnego magazynu</strong> z pomiarów HA/BMS.
+      Niżej możesz sprawdzić <strong>dołożenie dodatkowej pojemności</strong>: pierwszy magazyn zachowuje
+      swoją historyczną pracę, a drugi wykorzystuje tylko pozostałe oddanie i pobór z eLicznika.
+      Korzyści pierwszego nie doliczamy ponownie do wyniku rozbudowy.</p>
   </section>
 
   <div class="readout-card" style="text-align:left; margin-bottom:1rem;">
@@ -458,7 +456,12 @@
 
   <section class="panel" style="margin-bottom:1.25rem;">
     <h2>Rzeczywista wydajność magazynu (z danych Home Assistant)</h2>
-    <p class="hint">Koszt magazynu wpisujesz raz, w sekcji „Parametry" niżej — używany jest tu i tam, bo to ten sam fizyczny magazyn.</p>
+    <div class="roi-input-row" style="margin-bottom:.75rem;">
+      <label for="inputBatCost">Koszt obecnego magazynu [PLN]</label>
+      <input type="number" id="inputBatCost" step="0.01" min="0" placeholder="koszt istniejącej baterii">
+      <span class="hint" style="margin:0;">Tylko obecny magazyn. Koszt rozbudowy wpisujesz osobno niżej.
+        Górny nagłówek pokazuje czas pozostały według „Oszczędności”, bez odjęcia utraconego depozytu.</span>
+    </div>
     <p class="hint"><strong>Oszczędność</strong> = energia oddana z magazynu × stawka strefy godziny oddania, minus koszt energii kupionej z sieci do naładowania. Ładowanie z PV nie jest odejmowane — to pełny koszt zakupu, którego uniknąłeś. <strong>Utracony depozyt</strong> i <strong>Przyrostowo</strong> są obok jako osobna informacja: odpowiadają na inne pytanie („o ile lepiej wyszedłem na dołożeniu magazynu do samej PV") i zależą od tego, czy realnie zużywasz nadpłatę. Stawki strefowe wpisujesz w zakładce „Strefy" — bez nich wycena idzie jedną płaską stawką i jest tak oznaczona.</p>
     <div class="table-scroll">
       <table>
@@ -510,55 +513,90 @@
   </section>
 
   <div class="readout-card" style="text-align:left; margin-bottom:1.5rem;">
-    <span class="readout-label">Hipotetyczna symulacja — szacowany roczny zysk netto</span>
+    <span class="readout-label">Rozbudowa — dodatkowy wynik za wybrany okres, względem obecnego układu</span>
     <div class="readout mono" id="readoutMagazyn">—</div>
-    <span class="readout-sub" id="readoutMagazynSub">ustaw pojemność poniżej</span>
+    <span class="readout-sub" id="readoutMagazynSub">wpisz tylko dołożoną pojemność poniżej</span>
   </div>
 
-  <section class="panel" style="margin-bottom:1.25rem;">
-    <h2>Symulacja hipotetyczna — parametry</h2>
-    <p class="hint">Symulacja godzina-po-godzinie na danych aktualnie wczytanych w tej sesji (eLicznik + RCE z zakładki Depozyt) — jeśli przeładujesz stronę, wgraj pliki ponownie, żeby symulacja miała z czego liczyć.</p>
+  <section class="panel" style="margin-bottom:1.25rem;" id="extraBatteryParams">
+    <h2>Drugi magazyn — parametry rozbudowy</h2>
+    <p class="hint">Punktem wyjścia są zmierzone przepływy sieciowe <strong>po pracy obecnego magazynu</strong>.
+      Nie dodajemy ponownie danych BMS. Wpisz wyłącznie dodatkowe kWh, nie łączną pojemność obu baterii.
+      Wybierz okres, w którym obecny układ już działał — bez godzin sprzed jego montażu.</p>
     <div class="roi-input-row">
-      <label for="inputBatCapacity">Pojemność [kWh]</label>
-      <input type="number" id="inputBatCapacity" step="0.5" min="0" placeholder="np. 10">
+      <label for="inputExtraCapacity">Dodatkowa pojemność użytkowa [kWh]</label>
+      <input type="number" id="inputExtraCapacity" step="0.1" min="0" max="10000" placeholder="np. 5 — tylko dokładane kWh">
+      <span class="hint" style="margin:0;">Energia wewnątrz dodatkowej baterii między jej min. i maks. SOC, przed stratą rozładowania. 0 kWh = brak rozbudowy.</span>
     </div>
     <div class="roi-input-row" style="margin-top:.75rem;">
-      <label for="inputBatEfficiency">Sprawność cyklu [%]</label>
-      <input type="number" id="inputBatEfficiency" step="1" min="1" max="100" placeholder="90">
+      <label for="inputExtraEfficiency">Sprawność cyklu AC↔AC [%]</label>
+      <input type="number" id="inputExtraEfficiency" step="0.1" min="0.1" max="100" placeholder="90">
+      <span class="hint" style="margin:0;">90% to założenie, nie pomiar nowego urządzenia. Straty dzielimy symetrycznie między ładowanie i rozładowanie.</span>
     </div>
     <div class="roi-input-row" style="margin-top:.75rem;">
-      <label for="inputBatCost">Koszt magazynu [PLN]</label>
-      <input type="number" id="inputBatCost" step="0.01" min="0" placeholder="opcjonalnie, do payback">
-      <span class="hint" style="margin:0;">to samo pole zasila payback zarówno tutaj, jak i w sekcji „Rzeczywista wydajność” wyżej</span>
+      <label for="inputExtraChargeKw">Dostępna dodatkowa moc ładowania AC [kW]</label>
+      <input type="number" id="inputExtraChargeKw" step="0.1" min="0" placeholder="puste = bez limitu mocy">
     </div>
-    <button id="btnRunBattery" class="btn-primary" style="margin-top:1rem;">Przelicz symulację</button>
+    <div class="roi-input-row" style="margin-top:.75rem;">
+      <label for="inputExtraDischargeKw">Dostępna dodatkowa moc rozładowania AC [kW]</label>
+      <input type="number" id="inputExtraDischargeKw" step="0.1" min="0" placeholder="puste = bez limitu mocy">
+      <span class="hint" style="margin:0;">Przy wspólnym falowniku nie wpisuj automatycznie jego całej mocy — obecny układ już ją wykorzystuje.
+        To limity dostępne dla DODATKOWEJ baterii, nie osobna moc gwarantowana. 0 blokuje dany kierunek.</span>
+    </div>
+    <div class="roi-input-row" style="margin-top:.75rem;">
+      <label for="inputExtraCost">Koszt samej rozbudowy [PLN]</label>
+      <input type="number" id="inputExtraCost" step="0.01" min="0" placeholder="opcjonalnie — do czasu zwrotu rozbudowy">
+      <span class="hint" style="margin:0;">Nie obejmuje kosztu istniejącej baterii. Nie zmienia wyniku energetycznego ani górnej tabeli.</span>
+    </div>
+    <div class="roi-input-row" style="margin-top:.75rem;">
+      <label for="inputExtraStart">Porównuj od (włącznie)</label>
+      <input type="date" id="inputExtraStart">
+    </div>
+    <div class="roi-input-row" style="margin-top:.75rem;">
+      <label for="inputExtraEnd">Porównuj do (włącznie)</label>
+      <input type="date" id="inputExtraEnd">
+      <span class="hint" style="margin:0;">Puste daty = wszystkie wczytane godziny. Początek wybranego okresu = pusty dodatkowy magazyn.</span>
+    </div>
+    <button id="btnRunBattery" class="btn-primary" style="margin-top:1rem;">Przelicz rozbudowę</button>
+    <div id="extraBatteryStatus" class="hint" role="status" style="margin-top:.75rem;"></div>
   </section>
 
   <section class="panel">
-    <h2>Wpływ na miesiące (dane bieżącej sesji)</h2>
+    <h2>Obecny układ → układ z dodatkowym magazynem</h2>
+    <p class="hint">Wszystkie kWh dotyczą strony AC, poza stanem energii w baterii.
+      Wynik = uniknięty zakup po strefie godziny rozładowania minus utracony depozyt po RCE godziny ładowania.
+      Zakładamy pełne wykorzystanie depozytu — nie traktujemy go jak niewykorzystanej nadpłaty.</p>
     <div class="table-scroll">
       <table>
         <thead>
           <tr>
             <th>Miesiąc</th>
-            <th>Oddanie: stare → nowe</th>
-            <th>Pobór: stare → nowe</th>
-            <th>Zmiana przypisu</th>
-            <th>Oszcz. na zakupie</th>
-            <th>Zysk netto z magazynu</th>
+            <th>Oddanie [kWh]<br>obecnie → po rozbudowie</th>
+            <th>Pobór [kWh]<br>obecnie → po rozbudowie</th>
+            <th>Dodatkowe ładowanie [kWh]</th>
+            <th>Dodatkowe rozładowanie [kWh]</th>
+            <th>Utracony depozyt</th>
+            <th>Uniknięty zakup G13</th>
+            <th>Wynik samej rozbudowy</th>
+            <th>Energia w drugiej baterii na koniec [kWh]</th>
           </tr>
         </thead>
         <tbody id="magazynBody"></tbody>
+        <tfoot id="magazynFoot"></tfoot>
       </table>
     </div>
+    <p class="hint" id="extraBatterySummary"></p>
     <details class="assumptions">
-      <summary>Założenia (rozwiń)</summary>
+      <summary>Założenia i ograniczenia rozbudowy</summary>
       <ul>
-        <li>Magazyn ładuje się nadwyżką produkcji (to, co inaczej byłoby oddane do sieci) do swojej pojemności, i rozładowuje się zamiast kupowania z sieci, gdy jest deficyt — symulacja godzinowa, bez ograniczenia mocy ładowania/rozładowania (zakładamy że magazyn nadąża w skali godziny).</li>
-        <li>Sprawność cyklu (domyślnie 90%) oznacza że z każdej zmagazynowanej kWh da się realnie odzyskać tyle, ile wynika ze sprawności — reszta to strata.</li>
-        <li>Mniej oddania do sieci = mniejszy przypis do depozytu (to naturalny kompromis) — ale zwykle więcej zaoszczędzisz na unikniętym zakupie niż stracisz na depozycie, bo Twoja stawka zakupu zwykle przewyższa cenę RCE.</li>
-        <li>Oszczędność na zakupie liczona tą samą efektywną stawką (koszt energii ÷ pobór) co w zakładce Analiza.</li>
-        <li>To symulacja „co by było, gdyby" na już posiadanych danych historycznych — nie prognoza pogody ani przyszłej produkcji.</li>
+        <li>Pierwszy magazyn zachowuje swoją historyczną pracę. Drugi ładuje się wyłącznie z pozostałego oddania do sieci, a rozładowuje wyłącznie zamiast pozostałego poboru. Nie odtwarzamy ani nie sumujemy ponownie baterii z BMS.</li>
+        <li>To reguła maksymalizacji wykorzystania pozostałej energii, nie optymalizacja cenowa. Nie ładuje drugiej baterii z sieci, nie czeka na droższą strefę i nie rezygnuje z ładowania przy wysokim RCE. Dlatego większa pojemność nie musi dawać większego zysku.</li>
+        <li>Pobór może obejmować zaplanowane ładowanie pierwszej baterii. Model może go ograniczyć, ale nie wycenia tego ponownie w pierwszym magazynie. Nie symuluje zmian sterowania wspólnego falownika ani sztucznego wymuszenia kolejności rozładowania dwóch fizycznych paczek.</li>
+        <li>Stan dodatkowej baterii zaczyna od zera i przechodzi przez północ oraz granice miesięcy. Pojemność jest użytkowa wewnątrz baterii. Przy sprawności cyklu η przyjmujemy √η dla każdego kierunku. Energia pozostawiona na końcu nie jest jeszcze oszczędnością.</li>
+        <li>Puste limity mocy oznaczają wariant idealizowany bez ograniczeń mocy. Dane godzinowe nie ujawniają krótkich szczytów; nie uwzględniamy poboru własnego nowego falownika, degradacji, opłat stałych ani zmian pracy obecnego układu.</li>
+        <li>Przez lukę pomiarową nie przenosimy energii: kolejny odcinek zaczyna pusty. Jednoczesny pobór i oddanie albo jesienna podwójna godzina z eksportem blokuje pełny wynik. Podwójne zero jest neutralne. Sam pobór można rozliczyć po sumie, jeśli ma stałą strefę i ograniczenie mocy nie wiąże; inaczej wynik pozostaje nieznany.</li>
+        <li>Brak ceny zakupu lub RCE dla zmienionej energii oznacza „nieznane”, nigdy zero. Ujemne RCE traktujemy tak jak w Depozycie: wartość depozytu 0, bez dopisywania ujemnej sprzedaży.</li>
+        <li>Przeliczenie na rok pokazuje jedynie tempo z wybranego okresu (co najmniej 720 h bez luk i z pełną wyceną), nie prognozę. Zwrot dotyczy wyłącznie kosztu rozbudowy i całego czasu jej spłaty. Sezony, pogoda i ceny mogą zmienić wynik.</li>
       </ul>
     </details>
   </section>
@@ -662,9 +700,11 @@ const state = {
   refundRate: 0.30,       // 30% — rozliczenie godzinowe RCE potwierdzone przez użytkownika
   refundCapBasis: 'base', // 'base' = 30% od wartości energii wprowadzonej (literalny art. 4 ust. 11a pkt 2);
                           // 'deposit' = 30% od depozytu po ×1,23. Różnica 23%. Patrz refundCap() w validate.js.
-  batCapacityKwh: null,   // pojemność magazynu do symulacji (zakładka Magazyn)
-  batEfficiency: 0.90,    // sprawność cyklu magazynu
-  batCostPln: 0,          // koszt Twojego magazynu — używane zarówno w symulacji hipotetycznej jak i w realnej wydajności
+  batCapacityKwh: null,   // archiwalny parametr starej symulacji — NIE jest pojemnością rozbudowy
+  batEfficiency: 0.90,    // zachowany dla zgodności zapisu sprzed 0.3.4
+  batCostPln: 0,          // wyłącznie koszt OBECNEGO magazynu, zachowany bez migracji
+  extraBattery: { capacityKwh:null, efficiency:0.90, chargeKw:null, dischargeKw:null,
+    costPln:null, startDate:null, endDate:null }, // osobne, trwałe parametry rozbudowy
   zoneRates: {},          // stawki PLN/kWh per strefa (T1/T2/T3...), nazwy dynamiczne z danych
   haRejected: {},         // 'YYYY-MM' -> podsumowanie odrzuconych godzin (widoczne w UI)
   haBatteryCheck: {},     // 'YYYY-MM' -> wynik testu rozstępu SOC
@@ -857,6 +897,7 @@ function parseElicznikRows(rows, sourceLabel){
         date: dateStr, rawHour: hourObj,
         oddaniePoZbil: rodzajCls === 'oddanieZbil' ? val : 0,
         poborPoZbil: rodzajCls === 'poborZbil' ? val : 0,
+        hasImport: rodzajCls === 'poborZbil', hasExport: rodzajCls === 'oddanieZbil',
         strefa: colMap.strefa !== undefined ? String(row[colMap.strefa]).trim() : null
       });
     } else {
@@ -866,6 +907,8 @@ function parseElicznikRows(rows, sourceLabel){
         date: dateStr, rawHour: hourObj,
         oddaniePoZbil: isNaN(oddanieZbil) ? 0 : oddanieZbil,
         poborPoZbil: isNaN(poborZbil) ? 0 : poborZbil,
+        hasImport: colMap.poborZbil !== undefined && Number.isFinite(poborZbil),
+        hasExport: colMap.oddanieZbil !== undefined && Number.isFinite(oddanieZbil),
         strefa: colMap.strefa !== undefined ? String(row[colMap.strefa]).trim() : null
       });
     }
@@ -875,13 +918,13 @@ function parseElicznikRows(rows, sourceLabel){
   if (offset) log(sourceLabel + ': godziny numerowane 1–24 (konwencja "godzina rozliczeniowa") — przesuwam do 0–23.', 'debug');
 
   return out.map(function(r){
-    return {date:r.date, hour: r.rawHour.value - offset, oddaniePoZbil:r.oddaniePoZbil, poborPoZbil:r.poborPoZbil, strefa:r.strefa};
+    return {date:r.date, hour: r.rawHour.value - offset, oddaniePoZbil:r.oddaniePoZbil, poborPoZbil:r.poborPoZbil, strefa:r.strefa, hasImport:r.hasImport, hasExport:r.hasExport};
   });
 }
 
-function addElicznikRow(date, hour, oddanieZbil, poborZbil, strefa, seenKeys){
+function addElicznikRow(date, hour, oddanieZbil, poborZbil, strefa, seenKeys, presence){
   const key = date + '_' + String(hour).padStart(2,'0');
-  if (!state.hourlyElicznik[key]) state.hourlyElicznik[key] = {date:date, hour:hour, oddaniePoZbil:0, poborPoZbil:0, strefa:null};
+  if (!state.hourlyElicznik[key]) state.hourlyElicznik[key] = {date:date, hour:hour, oddaniePoZbil:0, poborPoZbil:0, strefa:null, hasImport:false, hasExport:false};
   if (seenKeys && !seenKeys.has(key)){
     // Pierwszy raz widzimy tę godzinę w BIEŻĄCYM imporcie - zerujemy zamiast
     // dosumowywać do wartości z poprzedniego (osobnego) importu. Format
@@ -889,10 +932,14 @@ function addElicznikRow(date, hour, oddanieZbil, poborZbil, strefa, seenKeys){
     // SAMYM imporcie, bo seenKeys pilnuje tylko granicy MIĘDZY importami.
     state.hourlyElicznik[key].oddaniePoZbil = 0;
     state.hourlyElicznik[key].poborPoZbil = 0;
+    state.hourlyElicznik[key].hasImport = false;
+    state.hourlyElicznik[key].hasExport = false;
     seenKeys.add(key);
   }
   state.hourlyElicznik[key].oddaniePoZbil += oddanieZbil;
   state.hourlyElicznik[key].poborPoZbil += poborZbil;
+  state.hourlyElicznik[key].hasImport = state.hourlyElicznik[key].hasImport || !presence || presence.hasImport === true;
+  state.hourlyElicznik[key].hasExport = state.hourlyElicznik[key].hasExport || !presence || presence.hasExport === true;
   if (strefa) state.hourlyElicznik[key].strefa = strefa;
 }
 
@@ -909,7 +956,7 @@ async function handleElicznikFiles(fileList){
         rows = parseCsvText(text);
       }
       const parsed = parseElicznikRows(rows, file.name);
-      parsed.forEach(function(r){ addElicznikRow(r.date, r.hour, r.oddaniePoZbil, r.poborPoZbil, r.strefa, seenKeys); });
+      parsed.forEach(function(r){ addElicznikRow(r.date, r.hour, r.oddaniePoZbil, r.poborPoZbil, r.strefa, seenKeys, r); });
       const distinctHours = new Set(parsed.map(function(r){ return r.date + '_' + r.hour; })).size;
       log(file.name + ': przetworzono ' + parsed.length + ' wierszy → ' + distinctHours + ' godzin.', parsed.length ? 'success' : 'warn');
       // F37: kompletność per miesiąc. Marzec 2026 przyszedł jako 671 z 743 h
@@ -1249,6 +1296,7 @@ function render(){
   renderAnaliza();
   renderWygasanie();
   renderStrefy();
+  renderMagazyn();
   renderRealBattery();
   renderBmsCompare();
   renderHaDiagnostics();
@@ -2066,44 +2114,6 @@ function resolveEffectiveRate(monthKey){
   return state.manualRatePlnKwh || null;
 }
 
-function simulateBattery(capacityKwh, efficiency){
-  const allHours = Object.values(state.hourlyElicznik).slice().sort(function(a,b){
-    const ka = a.date + String(a.hour).padStart(2,'0');
-    const kb = b.date + String(b.hour).padStart(2,'0');
-    return ka < kb ? -1 : (ka > kb ? 1 : 0);
-  });
-
-  let soc = 0;
-  const monthly = {};
-  allHours.forEach(function(row){
-    const mk = row.date.slice(0,7);
-    if (!monthly[mk]) monthly[mk] = {oldOddanie:0,newOddanie:0,oldPobor:0,newPobor:0,oldPrzypis:0,newPrzypis:0};
-    const rceKey = row.date + '_' + String(row.hour).padStart(2,'0');
-    const price = state.rceHourly[rceKey];
-
-    let oddanie = row.oddaniePoZbil;
-    let pobor = row.poborPoZbil;
-    monthly[mk].oldOddanie += oddanie;
-    monthly[mk].oldPobor += pobor;
-    if (price !== undefined) monthly[mk].oldPrzypis += hourlyDepositValue(oddanie, price);
-
-    if (oddanie > 0){
-      const canCharge = Math.min(oddanie, capacityKwh - soc);
-      soc += canCharge;
-      oddanie -= canCharge;
-    } else if (pobor > 0){
-      const availableUsable = soc * efficiency;
-      const canDischarge = Math.min(pobor, availableUsable);
-      soc -= (efficiency > 0 ? canDischarge / efficiency : 0);
-      pobor -= canDischarge;
-    }
-
-    monthly[mk].newOddanie += oddanie;
-    monthly[mk].newPobor += pobor;
-    if (price !== undefined) monthly[mk].newPrzypis += hourlyDepositValue(oddanie, price);
-  });
-  return monthly;
-}
 
 /* F45: tabela kontrola krzyżowa. Świadomie pokazuje OBA źródła i odchylenie,
  * a nie tylko wybrane — ukrycie rozbieżności byłoby powtórzeniem tego, co
@@ -2350,84 +2360,141 @@ function renderRealBattery(){
   }
 }
 
-function renderMagazyn(){
-  const tbody = document.getElementById('magazynBody');
-  const hasHourlyData = Object.keys(state.hourlyElicznik).length > 0;
-  if (!hasHourlyData){
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Brak danych godzinowych w tej sesji — wgraj pliki eLicznik i RCE w zakładce Depozyt.</td></tr>';
-    document.getElementById('readoutMagazyn').textContent = '—';
-    document.getElementById('readoutMagazynSub').textContent = 'brak danych w bieżącej sesji';
-    return;
-  }
-  const capacity = state.batCapacityKwh;
-  if (!capacity || capacity <= 0){
-    tbody.innerHTML = '<tr><td colspan="6" class="empty-state">Ustaw pojemność magazynu powyżej i kliknij „Przelicz symulację”.</td></tr>';
-    document.getElementById('readoutMagazyn').textContent = '—';
-    document.getElementById('readoutMagazynSub').textContent = 'ustaw pojemność powyżej';
-    return;
-  }
-
-  const efficiency = state.batEfficiency || 0.90;
-  const monthly = simulateBattery(capacity, efficiency);
-  const keys = Object.keys(monthly).sort();
-
-  let totalNetto = 0, totalMonths = keys.length;
-  tbody.innerHTML = keys.map(function(mk){
-    const d = monthly[mk];
-    const zmianaPrzypisu = d.newPrzypis - d.oldPrzypis; // ujemne = mniej do depozytu
-    const rate = resolveEffectiveRate(mk);
-    const oszczednosc = rate !== null ? (d.oldPobor - d.newPobor) * rate : null;
-    const zyskNetto = (oszczednosc || 0) + zmianaPrzypisu;
-    totalNetto += zyskNetto;
-    return '<tr>' +
-      '<td class="col-month">' + formatMonthLabel(mk) + '</td>' +
-      '<td class="num">' + formatKwh1(d.oldOddanie) + ' → ' + formatKwh1(d.newOddanie) + '</td>' +
-      '<td class="num">' + formatKwh1(d.oldPobor) + ' → ' + formatKwh1(d.newPobor) + '</td>' +
-      '<td class="num accent-rust">' + formatPLN(zmianaPrzypisu) + '</td>' +
-      '<td class="num accent-amber">' + (oszczednosc === null ? '—' : formatPLN(oszczednosc)) + '</td>' +
-      '<td class="num accent-strong">' + (oszczednosc === null ? '—' : formatPLN(zyskNetto)) + '</td>' +
-    '</tr>';
-  }).join('');
-
-  const readoutEl = document.getElementById('readoutMagazyn');
-  const subEl = document.getElementById('readoutMagazynSub');
-  const koszt = state.batCostPln || 0;
-  if (totalMonths === 0){
-    readoutEl.textContent = '—';
-    subEl.textContent = 'brak miesięcy do symulacji';
-  } else {
-    const rocznie = totalNetto * (12 / totalMonths);
-    if (koszt > 0){
-      if (rocznie > 0){
-        readoutEl.textContent = '~' + (koszt / rocznie).toFixed(1) + ' lat';
-        subEl.textContent = 'do zwrotu kosztu magazynu, przy ' + formatPLN(rocznie) + '/rok (ekstrapolacja z ' + totalMonths + ' mies.)';
-      } else {
-        // F35: „∞" nie mówiło użytkownikowi, że symulacja daje UJEMNY zysk.
-        readoutEl.textContent = 'nie zwraca się';
-        subEl.textContent = 'symulacja daje ' + formatPLN(rocznie) + '/rok — przy tych cenach i tym profilu '
-          + 'dodanie magazynu pogarsza wynik, a nie poprawia';
-      }
-    } else {
-      readoutEl.textContent = formatPLN(rocznie) + ' / rok';
-      subEl.textContent = 'ekstrapolacja z ' + totalMonths + ' dostępnych miesięcy — wpisz koszt magazynu, by zobaczyć payback';
+/* F58: wycena TYLKO rozbudowy. Żadnych danych baterii HA/BMS ani płaskiej
+ * stawki kosztEnergii/pobór. eLicznik jest już PO pracy obecnego magazynu. */
+function additionalBatteryFor(){
+  const p = state.extraBattery;
+  return V.simulateAdditionalBattery(Object.values(state.hourlyElicznik), {
+    capacityKwh:p.capacityKwh, efficiency:p.efficiency,
+    chargeKw:p.chargeKw, dischargeKw:p.dischargeKw,
+    startDate:p.startDate, endDate:p.endDate,
+    rateOf:function(date, hour, row){
+      const rate = (state.zoneRates || {})[row.strefa];
+      // Puste pole w Strefach było zapisywane jako 0. Nie udajemy, że
+      // oznacza to darmowy zakup. Bez wpisanej dodatniej stawki: nieznane.
+      return typeof rate === 'number' && Number.isFinite(rate) && rate > 0 ? rate : null;
+    },
+    rceOf:function(date, hour){
+      const rce = state.rceHourly[date + '_' + String(hour).padStart(2,'0')];
+      return rce === undefined ? null : rce;
     }
-  }
+  });
 }
 
-document.getElementById('inputBatCapacity').addEventListener('change', function(e){
-  const val = parseFloat(String(e.target.value).replace(',','.'));
-  state.batCapacityKwh = isNaN(val) ? null : val;
-  saveState();
-});
-document.getElementById('inputBatEfficiency').addEventListener('change', function(e){
-  const val = parseFloat(String(e.target.value).replace(',','.'));
-  state.batEfficiency = isNaN(val) ? 0.90 : (val/100);
-  saveState();
+function renderMagazyn(){
+  const tbody = document.getElementById('magazynBody');
+  const foot = document.getElementById('magazynFoot');
+  const readout = document.getElementById('readoutMagazyn');
+  const sub = document.getElementById('readoutMagazynSub');
+  const status = document.getElementById('extraBatteryStatus');
+  const summary = document.getElementById('extraBatterySummary');
+  foot.innerHTML = ''; summary.textContent = ''; status.textContent = '';
+  const p = state.extraBattery;
+  const noChargeLimit = p.chargeKw === null || p.chargeKw === '';
+  const noDischargeLimit = p.dischargeKw === null || p.dischargeKw === '';
+  const powerNote = noChargeLimit && noDischargeLimit
+    ? 'Wariant idealizowany BEZ OGRANICZEŃ MOCY — nie jest obietnicą pracy wspólnego falownika.'
+    : ('Limity dodatkowej mocy AC: ładowanie ' + (noChargeLimit ? 'bez limitu' : p.chargeKw + ' kW')
+       + ', rozładowanie ' + (noDischargeLimit ? 'bez limitu' : p.dischargeKw + ' kW')
+       + '. To nie jest automatyczna rezerwa mocy istniejącego falownika.');
+  status.textContent = powerNote;
+  if (!Object.keys(state.hourlyElicznik).length){
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">Brak godzin eLicznika — wgraj pełny eksport poboru i oddania w zakładce Depozyt.</td></tr>';
+    readout.textContent = '—'; sub.textContent = 'brak danych do porównania'; return;
+  }
+  const result = additionalBatteryFor();
+  const total = result.total;
+  if (!result.valid || !total || !total.hours){
+    tbody.innerHTML = '<tr><td colspan="9" class="empty-state">' + V.escapeHtml(result.reason) + '</td></tr>';
+    readout.textContent = '—'; sub.textContent = result.reason; return;
+  }
+  function cash(value, negative){
+    return value === null ? '<span class="tag-warn">nieznane</span>' : formatPLN(negative ? -value : value);
+  }
+  function rowHtml(m, label, isTotal){
+    const tag = m.badHours || m.gapHours ? ' <span class="tag-warn">niepełny okres</span>' : '';
+    return '<tr' + (isTotal ? ' style="font-weight:700;"' : '') + '>'
+      + '<td class="col-month">' + label + tag + '</td>'
+      + '<td class="num">' + formatKwh1(m.oldExportKwh) + ' → ' + formatKwh1(m.newExportKwh) + '</td>'
+      + '<td class="num">' + formatKwh1(m.oldImportKwh) + ' → ' + formatKwh1(m.newImportKwh) + '</td>'
+      + '<td class="num">' + formatKwh2(m.chargeKwh) + '</td>'
+      + '<td class="num">' + formatKwh2(m.dischargeKwh) + '</td>'
+      + '<td class="num accent-rust">' + cash(m.lostDepositPln, true) + '</td>'
+      + '<td class="num accent-amber">' + cash(m.purchaseSavingsPln, false) + '</td>'
+      + '<td class="num accent-strong">' + cash(m.netPln, false) + '</td>'
+      + '<td class="num">' + formatKwh2(m.endSocKwh) + '</td></tr>';
+  }
+  tbody.innerHTML = Object.keys(result.months).sort().map(function(mk){
+    return rowHtml(result.months[mk], formatMonthLabel(mk), false);
+  }).join('');
+  foot.innerHTML = rowHtml(total, 'SUMA / stan końcowy', true);
+  const notes = [powerNote];
+  if (result.reason) notes.push(result.reason);
+  if (result.gapCount) notes.push('Luki: ' + result.gapCount + ', łącznie ' + result.gapHours
+    + ' h. Energia odcięta przy przerwaniu odcinków: ' + formatKwh2(total.discardedKwh) + ' kWh.');
+  if (total.badHours || result.invalidRows) notes.push('Niejednoznaczne lub błędne godziny: '
+    + total.badHours + '; nieprawidłowe wiersze poza osią czasu: ' + result.invalidRows + '.');
+  if (total.unpricedChargeKwh > 1e-9) notes.push('Brak RCE dla ' + formatKwh2(total.unpricedChargeKwh) + ' kWh dodatkowego ładowania.');
+  if (total.unpricedDischargeKwh > 1e-9) notes.push('Brak stawki G13 dla ' + formatKwh2(total.unpricedDischargeKwh) + ' kWh dodatkowego rozładowania.');
+  if (result.dstNeutralKeys) notes.push('Jesienna podwójna godzina z zerowymi przepływami: neutralne przeniesienie stanu przez 2 h.');
+  if (result.dstImportKeys) notes.push('Jesienna podwójna godzina samego poboru: ta sama strefa G13, bez ładowania i bez wiążącego limitu mocy — bilans można ustalić z sumy obu godzin.');
+  const legacy = Object.values(state.hourlyElicznik).some(function(r){
+    return (!p.startDate || r.date >= p.startDate) && (!p.endDate || r.date <= p.endDate)
+      && (r.hasImport === undefined || r.hasExport === undefined);
+  });
+  if (legacy) notes.push('Starszy zapis eLicznika nie ma znaczników kompletności obu kierunków. Wgraj ponownie pełny eksport, aby je sprawdzić; zapisanych zer nie da się odróżnić od dawniej brakujących wierszy.');
+  status.textContent = notes.join(' ');
+  summary.textContent = 'Dodatkowe ładowanie: ' + formatKwh2(total.chargeKwh)
+    + ' kWh; oddane do domu zamiast zakupu: ' + formatKwh2(total.dischargeKwh)
+    + ' kWh; straty konwersji: ' + formatKwh2(total.lossKwh)
+    + ' kWh; pozostało wewnątrz baterii: ' + formatKwh2(total.endSocKwh)
+    + ' kWh (jeszcze bez oszczędności). Bilans obejmuje też jawnie odcięty SOC przy lukach.';
+  readout.textContent = total.netKnown ? formatPLN(total.netPln) : 'nieznany';
+  const period = result.firstDate + ' – ' + result.lastDate + ', ' + total.hours + ' h';
+  if (!total.netKnown){
+    sub.textContent = period + '. ' + result.reason;
+    return;
+  }
+  let text = period + '. Tylko dodatkowy wynik — bez ponownego doliczania obecnego magazynu.';
+  if (total.netPln < -0.005) text += ' W tym wariancie utracony depozyt przewyższa uniknięty zakup.';
+  if (result.annualNetPln !== null){
+    text += ' Przeliczenie tempa: ' + formatPLN(result.annualNetPln)
+      + '/rok (nie prognoza; sezonowość i ceny mogą zmienić wynik).';
+    const cost = p.costPln;
+    if (typeof cost === 'number' && Number.isFinite(cost) && cost > 0){
+      text += result.annualNetPln > 0
+        ? (' Całkowity zwrot SAMEJ rozbudowy przy tym tempie: ~'
+           + (cost / result.annualNetPln).toFixed(1) + ' lat, koszt ' + formatPLN(cost) + '.')
+        : ' Przy tym tempie koszt rozbudowy się nie zwraca — to nie ocena obecnej baterii.';
+    } else if (cost === null) text += ' Wpisz koszt samej rozbudowy, jeśli chcesz oszacować jej zwrot.';
+    else if (cost < 0) text += ' Koszt rozbudowy nie może być ujemny; czasu zwrotu nie policzono.';
+  } else {
+    text += ' Bez przeliczenia na rok i czasu zwrotu: potrzeba co najmniej 720 h bez luk, błędów i braków wyceny.';
+  }
+  sub.textContent = text;
+}
+
+const EXTRA_INPUTS = [
+  ['inputExtraCapacity','capacityKwh'], ['inputExtraEfficiency','efficiency'],
+  ['inputExtraChargeKw','chargeKw'], ['inputExtraDischargeKw','dischargeKw'],
+  ['inputExtraCost','costPln'], ['inputExtraStart','startDate'], ['inputExtraEnd','endDate']
+];
+EXTRA_INPUTS.forEach(function(p){
+  document.getElementById(p[0]).addEventListener('change', function(e){
+    const raw = String(e.target.value).trim();
+    if (p[1] === 'startDate' || p[1] === 'endDate') state.extraBattery[p[1]] = raw || null;
+    else {
+      const n = raw === '' ? null : Number(raw.replace(',','.'));
+      state.extraBattery[p[1]] = n === null || !Number.isFinite(n) ? null
+        : (p[1] === 'efficiency' ? n / 100 : n);
+    }
+    renderMagazyn();
+    saveState();
+  });
 });
 document.getElementById('inputBatCost').addEventListener('change', function(e){
   const val = parseFloat(String(e.target.value).replace(',','.'));
   state.batCostPln = isNaN(val) ? 0 : val;
-  renderMagazyn();
   renderRealBattery();
   saveState();
 });
@@ -2469,6 +2536,7 @@ function renderZoneRateInputs(zones){
       const val = parseFloat(String(e.target.value).replace(',','.'));
       state.zoneRates[zone] = isNaN(val) ? 0 : val;
       renderStrefy();
+      renderMagazyn();
       saveState();
     });
   });
@@ -2755,7 +2823,7 @@ function selfConsumptionFor(monthKey){
 async function saveState(){
   if (!storageUsable()) return;
   try{ await saveHaHourly(); }catch(e){}
-  try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, zoneRates: state.zoneRates,
+  try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, extraBattery: state.extraBattery, zoneRates: state.zoneRates,
     // F36: bez tego po restarcie znikały oznaczenia „bilans niemożliwy”
     // i tabela odrzuconych godzin, a zawyżone liczby zostawały.
     haBatteryCheck: state.haBatteryCheck, haRejected: state.haRejected, bmsCheck: state.bmsCheck})); }
@@ -2791,6 +2859,12 @@ async function loadState(){
           state.batCapacityKwh = (parsed.batCapacityKwh !== undefined) ? parsed.batCapacityKwh : null;
           state.batEfficiency = (parsed.batEfficiency !== undefined && parsed.batEfficiency !== null) ? parsed.batEfficiency : 0.90;
           state.batCostPln = parsed.batCostPln || 0;
+          // Nie kopiujemy kosztu ani pojemności pierwszej baterii do rozbudowy.
+          if (parsed.extraBattery && typeof parsed.extraBattery === 'object'){
+            Object.keys(state.extraBattery).forEach(function(k){
+              if (Object.prototype.hasOwnProperty.call(parsed.extraBattery, k)) state.extraBattery[k] = parsed.extraBattery[k];
+            });
+          }
           state.zoneRates = parsed.zoneRates || {};
           // F36: przywracamy diagnozę, nie tylko liczby. Bez tego restart
           // „czyścił” ostrzeżenia, choć dane nadal były uszkodzone.
@@ -2848,10 +2922,12 @@ async function loadState(){
   if (refundInput) refundInput.value = Math.round((state.refundRate !== undefined ? state.refundRate : 0.30) * 100);
   const basisInput = document.getElementById('inputRefundCapBasis');
   if (basisInput) basisInput.value = state.refundCapBasis === 'deposit' ? 'deposit' : 'base';
-  const capInput = document.getElementById('inputBatCapacity');
-  if (capInput && state.batCapacityKwh) capInput.value = state.batCapacityKwh;
-  const effInput = document.getElementById('inputBatEfficiency');
-  if (effInput) effInput.value = Math.round((state.batEfficiency !== undefined ? state.batEfficiency : 0.90) * 100);
+  EXTRA_INPUTS.forEach(function(p){
+    const el = document.getElementById(p[0]);
+    const val = state.extraBattery[p[1]];
+    if (el) el.value = val === null || val === undefined ? ''
+      : (p[1] === 'efficiency' ? Number((val * 100).toFixed(3)) : val);
+  });
   const batCostInput = document.getElementById('inputBatCost');
   if (batCostInput && state.batCostPln) batCostInput.value = state.batCostPln;
   updateRceStatus();
