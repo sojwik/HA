@@ -375,23 +375,23 @@ app.get('/api/ha/stats.csv', async (req, res) => {
 });
 
 /* ---------- statyczny frontend ---------- */
-// F38: index.html jest serwowany z ?v=<mtime> przy validate.js. Bez tego
-// przeglądarka po aktualizacji dodatku potrafiła uruchomić NOWY index.html
-// ze STARYM validate.js — na produkcji objawiało się to pojemnością
-// 16.35 kWh mimo 14.34 w kodzie, przy działającym nowym ostrzeżeniu F37.
+// F38 + PV: osobny tag treści każdego lokalnego zasobu. Dodanie PV nie
+// zmienia obliczeń/backendu HA; zapobiega mieszaninie starych i nowych modułów.
 const PUBLIC_DIR = path.join(__dirname, 'public');
-let assetTag = '';
-try {
-  assetTag = String(Math.floor(fs.statSync(path.join(PUBLIC_DIR, 'validate.js')).mtimeMs));
-} catch (e) { /* brak pliku — index poleci bez wersji */ }
-
+const ASSETS = ['validate.js', 'vendor/xlsx.full.min.js',
+  'pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css'];
+const assetTags = Object.create(null);
+for (const file of ASSETS) {
+  try {
+    const hash = require('crypto').createHash('sha256').update(fs.readFileSync(path.join(PUBLIC_DIR, file))).digest('hex');
+    assetTags[file] = String(parseInt(hash.slice(0, 12), 16));
+  } catch (e) { /* brak zasobu zostaje widoczny jako 404; bez fałszywego tagu */ }
+}
 app.get(['/', '/index.html'], (req, res, next) => {
   fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8', (err, html) => {
     if (err) return next(err);
-    if (assetTag) {
-      html = html.replace(/(<script src=")(validate\.js|vendor\/xlsx\.full\.min\.js)(")/g,
-        (m, a, file, c) => a + file + '?v=' + assetTag + c);
-    }
+    html = html.replace(/((?:src|href)=")([^"]+)(")/g,
+      (m, a, file, c) => assetTags[file] ? a + file + '?v=' + assetTags[file] + c : m);
     res.set('Cache-Control', 'no-cache');
     res.type('html').send(html);
   });

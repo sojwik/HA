@@ -1,0 +1,27 @@
+/* Styl tylko nowej karty; nie nadpisuje tabel/kolorów pozostałych paneli. */
+#tab-pv{--pv-gap:1rem}
+#tab-pv .pv-heading{display:flex;justify-content:space-between;align-items:center;gap:1rem;margin-bottom:1rem;flex-wrap:wrap}
+#tab-pv h2{font-size:1.6rem;margin:0}#tab-pv h3{font-size:1.02rem;margin:.1rem 0 .8rem}
+#tab-pv .pv-badge{border:1px solid var(--amber);color:var(--amber-strong);background:var(--amber-soft);border-radius:24px;padding:.35rem .8rem;font-size:.78rem;font-weight:600}
+#tab-pv .pv-notice{border-left:3px solid var(--amber);background:var(--amber-soft);padding:.85rem 1rem;border-radius:0 8px 8px 0;font-size:.85rem;margin:1rem 0}
+#tab-pv .pv-section{margin-bottom:1.25rem}
+#tab-pv .pv-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1.1rem 1rem;margin:1rem 0}
+#tab-pv .pv-period{grid-template-columns:1fr 1fr 2fr}#tab-pv #pvEntities{grid-template-columns:repeat(2,minmax(0,1fr))}
+#tab-pv .pv-field{display:flex;flex-direction:column;gap:.3rem;min-width:0}
+#tab-pv label{font-size:.82rem;font-weight:500}#tab-pv small{font-size:.73rem;color:var(--text-muted);line-height:1.45}
+#tab-pv input:not([type=checkbox]),#tab-pv select{border:1px solid var(--border);background:var(--inset);color:var(--text);padding:.55rem .7rem;border-radius:7px;min-width:0;width:100%;font:inherit;font-size:.87rem}
+#tab-pv input[type=number]{font-family:'IBM Plex Mono',monospace;font-variant-numeric:tabular-nums}
+#tab-pv input:read-only{color:var(--text-muted)}#tab-pv input:disabled,#tab-pv select:disabled{opacity:.5}
+#tab-pv select:focus-visible{outline:2px solid var(--teal);outline-offset:2px}#tab-pv input[type=checkbox]{accent-color:var(--teal);width:1rem;height:1rem;flex-shrink:0;margin:.12rem 0 0}
+#tab-pv .pv-check{display:flex;align-items:flex-start;gap:.6rem;font-size:.81rem;font-weight:400;padding:.4rem 0;line-height:1.5}
+#tab-pv .pv-actions{display:flex;flex-wrap:wrap;align-items:center;gap:.65rem;margin:1rem 0}
+#tab-pv .pv-muted{font-size:.8rem;color:var(--text-muted)}#tab-pv .pv-error{color:#ffb1a5!important}
+#tab-pv #pvStatus{font-size:.86rem;margin-bottom:.4rem}#tab-pv #pvSaveStatus{min-height:1.2em}
+#tab-pv details{margin:.9rem 0}#tab-pv summary{cursor:pointer;color:var(--teal);font-size:.85rem;font-weight:500}
+#tab-pv .pv-metrics{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:.8rem;margin:1rem 0}
+#tab-pv .pv-metric{padding:1rem}#tab-pv .pv-metric strong{display:block;color:var(--amber-strong);font-size:1.15rem;margin-top:.5rem;overflow-wrap:anywhere}
+#tab-pv .pv-issues{max-height:25rem;overflow:auto;padding-left:1.3rem;font-size:.77rem}#tab-pv .pv-issues li{margin:.5rem 0}
+#tab-pv table{font-size:.8rem;min-width:750px}#tab-pv caption{text-align:left;font-size:.77rem;color:var(--text-muted);padding:.75rem}
+#tab-pv .table-scroll{margin:1rem 0}#tab-pv button:disabled{opacity:.45;cursor:not-allowed}
+@media(max-width:900px){#tab-pv .pv-grid{grid-template-columns:repeat(2,minmax(0,1fr))}#tab-pv .pv-period{grid-template-columns:1fr 1fr}#tab-pv .pv-wide{grid-column:1/-1}#tab-pv .pv-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:560px){#tab-pv .pv-grid,#tab-pv #pvEntities{grid-template-columns:1fr}#tab-pv .pv-metric strong{font-size:1rem}#tab-pv .pv-heading{align-items:flex-start}#tab-pv .pv-actions button{width:100%}}
