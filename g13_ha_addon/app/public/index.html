@@ -13,6 +13,7 @@
      tokenów HA. Plik lokalny, wersja 0.20.3. -->
 <script src="vendor/xlsx.full.min.js"></script>
 <script src="validate.js"></script>
+<link rel="stylesheet" href="pv-tab.css">
 <style>
   :root{
     --bg:#14181d; --surface:#1b2129; --surface-alt:#232b34; --inset:#0b0e12;
@@ -200,6 +201,7 @@
     <button class="tab-btn" data-tab="analiza" type="button">Analiza (ROI)</button>
     <button class="tab-btn" data-tab="strefy" type="button">Strefy</button>
     <button class="tab-btn" data-tab="magazyn" type="button">Magazyn</button>
+    <button class="tab-btn" data-tab="pv" type="button">Rozbudowa PV</button>
   </nav>
 
   <div id="tab-depozyt" class="tab-panel">
@@ -638,6 +640,7 @@
 
   </div>
 
+  <div id="tab-pv" class="tab-panel" hidden></div>
 </div>
 
 <script>
@@ -711,6 +714,33 @@ const state = {
   haHourly: {},           // 'YYYY-MM' -> [{ts,ladowanie,rozladowanie}] do walidacji miesięcznej
   bmsCheck: {}            // 'YYYY-MM' -> wynik reconcileBatteryMonth (BMS vs Growatt)
 };
+/* PV_READ_ONLY_BRIDGE_BEGIN — jedyny punkt współdzielenia, bez setterów.
+ * Kopia + deepFreeze: nowa karta nie dostaje referencji do legacy state.
+ * Brak months, kosztów inwestycji, wyników BMS i parametrów drugiej baterii. */
+let pvResolveReady;
+const pvReady = new Promise(function(resolve){ pvResolveReady = resolve; });
+Object.defineProperty(window, 'G13PvReadOnly', {
+  configurable: false, writable: false,
+  value: Object.freeze({
+    whenReady: pvReady,
+    getSnapshot: function(){
+      const copy = JSON.parse(JSON.stringify({
+        hourlyElicznik: state.hourlyElicznik,
+        rceHourly: state.rceHourly,
+        zoneRates: state.zoneRates
+      }));
+      function freeze(x){
+        if (x && typeof x === 'object'){
+          Object.keys(x).forEach(function(k){ freeze(x[k]); });
+          Object.freeze(x);
+        }
+        return x;
+      }
+      return freeze(copy);
+    }
+  })
+});
+/* PV_READ_ONLY_BRIDGE_END */
 let rceBuffer = {};
 let apiSampleLogged = false;
 
@@ -3225,11 +3255,16 @@ async function exportEntitiesCsv(){
 
 /* ============================== INIT ============================== */
 loadState().then(function(){
+  pvResolveReady(); // PV: gotowa tylko kopia do odczytu, bez zmian obliczeń legacy.
   autoSyncGrowattFromHA();
   setupGrowattAutoRefresh();
 });
 
 })();
 </script>
+<script src="pv-model.js"></script>
+<script src="pv-data.js"></script>
+<script src="pv-store.js"></script>
+<script src="pv-tab.js"></script>
 </body>
 </html>

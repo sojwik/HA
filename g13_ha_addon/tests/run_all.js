@@ -9,6 +9,10 @@ const SUITES = [
   ['Frontend (jednostkowe + realne dane)', 'test_frontend.js'],
   ['Serwer (integracyjny HTTP)', 'test_server.js'],
   ['DOM (dymny, jsdom)', 'test_dom_smoke.js'],
+  ['PV — fizyka i ekonomia scenariusza', 'test_pv_model.js'],
+  ['PV — dane, DST i osobny zapis', 'test_pv_data_store.js'],
+  ['PV — izolacja DOM', 'test_pv_dom.js'],
+  ['PV — HTTP, zasoby i KV', 'test_pv_http.js'],
 ];
 
 let totalFail = 0;
