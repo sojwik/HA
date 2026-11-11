@@ -542,6 +542,58 @@ t('N15 eksport encji prosi o change i sum, nie tylko mean', () => {
     'liczniki energii potrzebują change — mean z licznika to nie energia');
 });
 
+
+/* F58: kompletność kierunków jest metadanymi, nie zmienia starych sum. */
+['classifyEnergyLabel','classifyElicznikColumn','detectHourOffset','parseElicznikRows','addElicznikRow']
+  .forEach(name=>vm.runInContext(extractFn(name),sandbox));
+function efParse(rows){return sandbox.parseElicznikRows(rows,'fixture');}
+function efAdd(rows){
+  const seen=new Set();
+  rows.forEach(r=>sandbox.addElicznikRow(r.date,r.hour,r.oddaniePoZbil,r.poborPoZbil,r.strefa,seen,r));
+  return Object.values(sandbox.state.hourlyElicznik);
+}
+const efHead=['Data','Strefa','Wartość','Rodzaj'];
+function efLong(imp,exp){
+  const a=[efHead];
+  if(imp!==undefined)a.push(['2026-07-01 24:00','T3',String(imp),'pobrana po zbilansowaniu [kWh]']);
+  if(exp!==undefined)a.push(['2026-07-01 24:00','T3',String(exp),'oddana po zbilansowaniu [kWh]']);
+  return efParse(a);
+}
+t('E1 format długi: jawne zero obu kierunków to kompletny pomiar',()=>{
+  sandbox.state.hourlyElicznik={}; const r=efAdd(efLong(0,0))[0];
+  assert.strictEqual(r.hasImport,true);assert.strictEqual(r.hasExport,true);
+  assert.strictEqual(r.poborPoZbil,0);assert.strictEqual(r.oddaniePoZbil,0);
+});
+t('E2 format długi: brak eksportu nie jest potwierdzonym zerem',()=>{
+  sandbox.state.hourlyElicznik={}; const r=efAdd(efLong(2,undefined))[0];
+  assert.strictEqual(r.hasImport,true);assert.strictEqual(r.hasExport,false);
+  const a=V.simulateAdditionalBattery([r],{capacityKwh:5});
+  assert.strictEqual(a.total.netPln,null);
+});
+t('E3 format szeroki bez kolumny importu ma hasImport=false',()=>{
+  const r=efParse([['Data','Godzina','Oddana po zbilansowaniu [kWh]'],['2026-07-01','24:00','2']])[0];
+  assert.strictEqual(r.hasImport,false);assert.strictEqual(r.hasExport,true);
+  assert.strictEqual(r.oddaniePoZbil,2);
+});
+t('E4 pusta komórka w szerokim formacie różni się od jawnego 0',()=>{
+  const h=['Data','Godzina','Pobrana po zbilansowaniu [kWh]','Oddana po zbilansowaniu [kWh]'];
+  const a=efParse([h,['2026-07-01','24:00','','2']])[0];
+  const b=efParse([h,['2026-07-01','24:00','0','2']])[0];
+  assert.strictEqual(a.hasImport,false);assert.strictEqual(b.hasImport,true);
+});
+t('E5 ponowny import zeruje stare flagi kompletności, nie pożycza kierunku z poprzedniego pliku',()=>{
+  sandbox.state.hourlyElicznik={}; efAdd(efLong(1,2));
+  const r=efAdd(efLong(undefined,3))[0];
+  assert.strictEqual(r.hasImport,false);assert.strictEqual(r.hasExport,true);
+  assert.strictEqual(r.poborPoZbil,0);assert.strictEqual(r.oddaniePoZbil,3);
+});
+t('E6 znacznik kompletności nie zmienia sum energii i nie dubluje ponownego importu',()=>{
+  sandbox.state.hourlyElicznik={};efAdd(efLong(1.25,2.75));
+  const r=efAdd(efLong(1.25,2.75))[0];
+  assert.strictEqual(r.poborPoZbil,1.25);assert.strictEqual(r.oddaniePoZbil,2.75);
+  assert.strictEqual(r.hasImport,true);assert.strictEqual(r.hasExport,true);
+});
+
 console.log(`\n${pass} przeszło, ${fail} nie przeszło`);
 module.exports = { pass, fail };
 if (require.main === module) process.exit(fail ? 1 : 0);

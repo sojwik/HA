@@ -95,12 +95,12 @@ function serveDir(dir) {
   // ale teraz wyceniana po strefie godziny oddania, nie płaską stawką.
   t('D7 tabela magazynu ma 8 kolumn',
     w.document.querySelectorAll('#realBatteryBody')[0].closest('table').querySelectorAll('thead th').length === 8);
-  t('D7b nagłówki rozdzielają oszczędność od wyniku przyrostowego', () => {
+  t('D7b nagłówki rozdzielają oszczędność od wyniku przyrostowego', (() => {
     const ths = Array.from(w.document.querySelectorAll('#realBatteryBody')[0]
       .closest('table').querySelectorAll('thead th')).map(x => x.textContent);
     return ths.includes('Oszczędność') && ths.includes('Utracony depozyt')
       && ths.includes('Przyrostowo') && !ths.includes('Zysk netto');
-  });
+  })()); // 0.3.4: t przyjmuje bool; sam callback był zawsze truthy.
 
   console.log('\n=== XSS: nazwa strefy nie wykonuje kodu ===');
   // Wstrzykujemy złośliwą nazwę strefy przez publiczny escape i sprawdzamy,
@@ -693,6 +693,135 @@ function serveDir(dir) {
     dU.txt.slice(0, 260));
   t('D54b bez eLicznika KOMORKA = "nieznane", nie zero',
     dU.cells[3] === 'nieznane', JSON.stringify(dU.cells));
+
+
+  /* ===== F58: realny DOM dwóch osobnych magazynów ===== */
+  console.log('\n=== D55–D72: rozbudowa na resztkowym eLiczniku ===');
+  function extraKv(){
+    const kv=ecoKv(true), ledger=JSON.parse(kv['monthly-ledger']);
+    ledger.batCostPln=5000;
+    ledger.batCapacityKwh=123; ledger.batEfficiency=.5; // stare pola NIE są parametrami rozbudowy
+    ledger.manualRatePlnKwh=99; ledger.months['2026-07'].kosztEnergii=999; // wabik na stary fallback
+    ledger.extraBattery={capacityKwh:5,efficiency:1,chargeKw:null,dischargeKw:null,
+      costPln:2000,startDate:null,endDate:null};
+    const el={}, rce={};
+    for(let h=0;h<744;h++){
+      const dt=new Date(Date.UTC(2026,6,1)+h*3600000);
+      const date=dt.toISOString().slice(0,10), hour=dt.getUTCHours();
+      const key=date+'_'+String(hour).padStart(2,'0');
+      el[key]={date,hour,oddaniePoZbil:h===12?5:0,poborPoZbil:h===19?3:0,
+        strefa:hour>=19&&hour<=21?'T2':hour>=7&&hour<=12?'T1':'T3',hasImport:true,hasExport:true};
+      rce[key]=h===12?400:9000; // inne godziny: wabik na przesunięcie RCE
+    }
+    kv['monthly-ledger']=JSON.stringify(ledger);
+    kv['elicznik-hourly-2026-07']=JSON.stringify(el);
+    kv['rce-cache']=JSON.stringify({v:2,data:rce});
+    return kv;
+  }
+  function xtext(d,id){return (d.window.document.getElementById(id).textContent||'').replace(/\s+/g,' ').trim();}
+  function xcells(d){return Array.from(d.window.document.querySelectorAll('#magazynBody tr:first-child td'))
+    .map(x=>x.textContent.replace(/\s+/g,' ').trim());}
+  function xset(d,id,value){
+    const el=d.window.document.getElementById(id); el.value=value;
+    el.dispatchEvent(new d.window.Event('change',{bubbles:true}));
+  }
+  const dx=await loadWithCache(null,extraKv(),cfgBms,undefined,null);
+  const xc=xcells(dx);
+  t('D55 osobna tabela rozbudowy ma 9 kolumn i osobne pole kosztu',
+    xc.length===9 && !!dx.window.document.getElementById('inputExtraCost')
+    && dx.window.document.querySelectorAll('#inputBatCost').length===1,JSON.stringify(xc));
+  t('D56 konkretne KOMÓRKI: drugie 5 kWh -> 3 kWh, G13 4,50, depozyt -2,46, wynik 2,04',
+    xc[3]==='5,00' && xc[4]==='3,00' && xc[5]==='-2,46 zł' && xc[6]==='4,50 zł'
+    && xc[7]==='2,04 zł' && xc[8]==='2,00',JSON.stringify(xc));
+  t('D57 główny wynik to okres 2,04 zł, nie roczne tempo i nie wynik pierwszej baterii',
+    xtext(dx,'readoutMagazyn')==='2,04 zł',xtext(dx,'readoutMagazyn'));
+  t('D58 przeliczenie roczne po 744 h, zwrot tylko kosztu drugiej baterii (2000 zł)',
+    /24,02 zł\/rok/.test(xtext(dx,'readoutMagazynSub'))
+    && /83\.3 lat/.test(xtext(dx,'readoutMagazynSub'))
+    && /SAMEJ rozbudowy/.test(xtext(dx,'readoutMagazynSub')),xtext(dx,'readoutMagazynSub'));
+  const extraBefore=xtext(dx,'readoutMagazynSub');
+  xset(dx,'inputBatCost','9000');
+  const realAfter=xtext(dx,'readoutRealBattery')+'|'+xtext(dx,'readoutRealBatterySub');
+  const existingDoesNotAffect=extraBefore===xtext(dx,'readoutMagazynSub');
+  xset(dx,'inputExtraCost','4000');
+  t('D59 koszty rozdzielone w OBIE strony: zmiana drugiego nie zmienia pierwszego i odwrotnie',
+    existingDoesNotAffect && realAfter===xtext(dx,'readoutRealBattery')+'|'+xtext(dx,'readoutRealBatterySub')
+    && /166\.5 lat/.test(xtext(dx,'readoutMagazynSub')),xtext(dx,'readoutMagazynSub'));
+  await new Promise(r=>setTimeout(r,120));
+  const savedExtra=JSON.parse(dx.__kv['monthly-ledger']);
+  const savedGrid=JSON.parse(dx.__kv['elicznik-hourly-2026-07']);
+  t('D60 symulacja nie nadpisuje przepływów eLicznika ani depozytu scenariuszem',
+    savedGrid['2026-07-01_12'].oddaniePoZbil===5 && savedGrid['2026-07-01_19'].poborPoZbil===3
+    && savedExtra.months['2026-07'].kwh===5,JSON.stringify(savedExtra.months['2026-07']));
+  t('D61 parametry i dwa koszty zapisują się niezależnie',
+    savedExtra.batCostPln===9000 && savedExtra.extraBattery.costPln===4000
+    && savedExtra.extraBattery.capacityKwh===5 && savedExtra.batCapacityKwh===123,JSON.stringify(savedExtra.extraBattery));
+  const xr=await loadWithCache(null,Object.assign({},dx.__kv),cfgBms,undefined,null);
+  t('D62 restart przywraca dodatkowe parametry i ten sam wynik, bez dublowania danych',
+    xr.window.document.getElementById('inputExtraCost').value==='4000'
+    && xr.window.document.getElementById('inputBatCost').value==='9000'
+    && xr.window.document.getElementById('inputExtraCapacity').value==='5'
+    && xtext(xr,'readoutMagazyn')==='2,04 zł');
+  xr.window.close();
+  xset(dx,'inputExtraCapacity','0');
+  const xzero=xcells(dx);
+  t('D63 0 dodatkowych kWh = 0,00 zł i brak zmiany importu/eksportu',
+    xtext(dx,'readoutMagazyn')==='0,00 zł' && xzero[1]==='5,0 → 5,0'
+    && xzero[2]==='3,0 → 3,0',JSON.stringify(xzero));
+  t('D67 brak limitów mocy jawnie oznaczony jako wariant idealizowany',
+    /BEZ OGRANICZEŃ MOCY/.test(xtext(dx,'extraBatteryStatus')));
+  xset(dx,'inputExtraCapacity','5'); xset(dx,'inputExtraChargeKw','0');
+  t('D68 wpisane 0 kW blokuje ładowanie, nie znaczy pustego pola',
+    xcells(dx)[3]==='0,00' && xtext(dx,'readoutMagazyn')==='0,00 zł'
+    && /ładowanie 0 kW/.test(xtext(dx,'extraBatteryStatus')),JSON.stringify(xcells(dx)));
+  xset(dx,'inputExtraChargeKw','');
+  xset(dx,'zoneRate_T2','0.63');
+  t('D69 zmiana stawki G13 od razu przelicza drugi magazyn, bez starego fallbacku',
+    xcells(dx)[6]==='1,89 zł' && xcells(dx)[7]==='-0,57 zł',JSON.stringify(xcells(dx)));
+  t('D71 ujemny wynik opisuje TYLKO rozbudowę, bez oceny pierwszej baterii',
+    /to nie ocena obecnej baterii/.test(xtext(dx,'readoutMagazynSub'))
+    && /utracony depozyt przewyższa/.test(xtext(dx,'readoutMagazynSub')),xtext(dx,'readoutMagazynSub'));
+  xset(dx,'inputExtraStart','2026-07-02');
+  t('D70 filtr dat usuwa wcześniejsze ładowanie i zaczyna od pustego drugiego magazynu',
+    xtext(dx,'readoutMagazyn')==='0,00 zł' && xcells(dx)[3]==='0,00'
+    && /2026-07-02/.test(xtext(dx,'readoutMagazynSub')));
+  dx.window.close();
+
+  const ngKv=extraKv(), ngLedger=JSON.parse(ngKv['monthly-ledger']);
+  ngLedger.zoneRates={}; ngKv['monthly-ledger']=JSON.stringify(ngLedger);
+  const ng=await loadWithCache(null,ngKv,cfgBms,undefined,null);
+  const ngc=xcells(ng);
+  t('D64 brak G13: komórka zakupu i wyniku NIEZNANE mimo manualRate=99',
+    ngc[5]==='-2,46 zł' && ngc[6]==='nieznane' && ngc[7]==='nieznane'
+    && xtext(ng,'readoutMagazyn')==='nieznany',JSON.stringify(ngc));
+  ng.window.close();
+
+  const nrKv=extraKv(), nrRce=JSON.parse(nrKv['rce-cache']);
+  delete nrRce.data['2026-07-01_12']; nrKv['rce-cache']=JSON.stringify(nrRce);
+  const nr=await loadWithCache(null,nrKv,cfgBms,undefined,null); const nrc=xcells(nr);
+  t('D65 brak RCE: komórka kosztu i wyniku NIEZNANE, zakup nadal 4,50 zł',
+    nrc[5]==='nieznane' && nrc[6]==='4,50 zł' && nrc[7]==='nieznane'
+    && /Brak RCE/.test(xtext(nr,'extraBatteryStatus')),JSON.stringify(nrc));
+  nr.window.close();
+
+  const oldxKv=extraKv(), oldxLedger=JSON.parse(oldxKv['monthly-ledger']);
+  delete oldxLedger.extraBattery; oldxKv['monthly-ledger']=JSON.stringify(oldxLedger);
+  const oldx=await loadWithCache(null,oldxKv,cfgBms,undefined,null);
+  t('D66 migracja: stara pojemność/koszt NIE stają się potajemnie parametrami drugiej baterii',
+    oldx.window.document.getElementById('inputExtraCapacity').value===''
+    && oldx.window.document.getElementById('inputExtraCost').value===''
+    && oldx.window.document.getElementById('inputBatCost').value==='5000'
+    && xtext(oldx,'readoutMagazyn')==='—');
+  oldx.window.close();
+
+  const incompleteKv=extraKv(), incEl=JSON.parse(incompleteKv['elicznik-hourly-2026-07']);
+  incEl['2026-07-01_12'].hasImport=false;
+  incompleteKv['elicznik-hourly-2026-07']=JSON.stringify(incEl);
+  const inc=await loadWithCache(null,incompleteKv,cfgBms,undefined,null);
+  t('D72 brak jednego kierunku w nowym eksporcie blokuje pełny wynik zamiast udawać zero',
+    xtext(inc,'readoutMagazyn')==='nieznany' && xcells(inc)[7]==='nieznane'
+    && /niepełny okres/.test(xcells(inc)[0]),JSON.stringify(xcells(inc)));
+  inc.window.close();
 
   srv.close();
   console.log(`\n${pass} przeszło, ${fail} nie przeszło`);

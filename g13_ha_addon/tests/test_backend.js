@@ -594,6 +594,221 @@ t('M43 pusty log → known=false bez wyjatku', () => {
   assert.strictEqual(r2.known, false, 'null nie moze wywrócić renderu');
 });
 
+
+/* ===== F58: drugi magazyn, tylko przyrost względem resztkowego eLicznika ===== */
+const XB = V.simulateAdditionalBattery;
+function xh(date, hour, imp, exp, rest) {
+  return Object.assign({ date, hour, poborPoZbil:imp, oddaniePoZbil:exp,
+    hasImport:true, hasExport:true, rate:1.5, rce:400 }, rest || {});
+}
+function xs(rows, opts) {
+  return XB(rows, Object.assign({ capacityKwh:5, efficiency:1, includeHourly:true,
+    rateOf:(_d,_h,r)=>r.rate, rceOf:(_d,_h,r)=>r.rce }, opts || {}));
+}
+function xn(actual, expected, eps=1e-8) {
+  assert.ok(typeof actual === 'number' && Math.abs(actual-expected)<eps, actual+' != '+expected);
+}
+const xPair = () => [xh('2026-07-01',12,0,5), xh('2026-07-01',13,3,0)];
+
+t('X1 dodatkowe 0 kWh = dokładnie 0 efektu, nawet bez cen', () => {
+  const z=xs(xPair(),{capacityKwh:0, rateOf:()=>null,rceOf:()=>null});
+  xn(z.total.chargeKwh,0); xn(z.total.dischargeKwh,0); xn(z.total.netPln,0);
+  xn(z.total.newImportKwh,z.total.oldImportKwh); xn(z.total.newExportKwh,z.total.oldExportKwh);
+});
+t('X2 pusty start nie daje darmowego rozładowania przed pierwszym eksportem', () => {
+  const r=xs([xh('2026-07-01',11,3,0),xh('2026-07-01',12,0,5)]);
+  xn(r.total.dischargeKwh,0); xn(r.total.newImportKwh,3);
+  assert.ok(r.total.netPln<0, 'energia na końcu nie jest jeszcze oszczędnością');
+});
+t('X3 limit DODATKOWEJ pojemności, bez dodawania 14,34 kWh pierwszej baterii', () => {
+  const r=xs([xh('2026-07-01',12,0,5),xh('2026-07-01',13,5,0)],{capacityKwh:2});
+  xn(r.total.chargeKwh,2); xn(r.total.dischargeKwh,2);
+  xn(r.total.newExportKwh,3); xn(r.total.newImportKwh,3);
+});
+t('X4 cykl 81%: 10 kWh AC wchodzi, 8,1 kWh wychodzi, straty 1,9 kWh', () => {
+  const r=xs([xh('2026-07-01',12,0,10),xh('2026-07-01',13,10,0)],{capacityKwh:10,efficiency:.81});
+  xn(r.total.chargeKwh,10); xn(r.total.dischargeKwh,8.1); xn(r.total.lossKwh,1.9);
+  xn(r.total.endSocKwh,0); xn(r.total.balanceErrorKwh,0);
+});
+t('X5 osobne limity mocy AC ograniczają godzinę, nie pojemność', () => {
+  const r=xs(xPair(),{chargeKw:2,dischargeKw:1});
+  xn(r.total.chargeKwh,2); xn(r.total.dischargeKwh,1); xn(r.total.endSocKwh,1);
+});
+t('X6 limit mocy 0 to blokada kierunku, nie Infinity', () => {
+  const a=xs(xPair(),{chargeKw:0}), b=xs(xPair(),{dischargeKw:0});
+  xn(a.total.chargeKwh,0); xn(a.total.netPln,0);
+  xn(b.total.dischargeKwh,0); assert.ok(b.total.netPln<0);
+});
+t('X7 dane pierwszego magazynu/BMS nie są doliczane drugi raz', () => {
+  const rows=xPair(); const before=JSON.stringify(rows);
+  const a=xs(rows);
+  const b=xs(rows.map(r=>Object.assign({},r,{ladowanie:1000,rozladowanie:2000,produkcja:9999})),
+    {existingCapacityKwh:500, existingProfitPln:999999,batCostPln:5000});
+  assert.deepStrictEqual(a.total,b.total); assert.strictEqual(JSON.stringify(rows),before);
+});
+t('X8 SOC przechodzi przez granicę miesiąca; koszt w ładowaniu, zysk w rozładowaniu', () => {
+  const r=xs([xh('2026-06-30',23,0,4,{rce:500}),xh('2026-07-01',0,3,0)]);
+  xn(r.months['2026-06'].endSocKwh,4); xn(r.months['2026-07'].startSocKwh,4);
+  xn(r.months['2026-06'].netPln,-2.46); xn(r.months['2026-07'].netPln,4.5);
+  xn(r.total.netPln,2.04); assert.strictEqual(r.gapCount,0);
+  Object.values(r.months).forEach(m=>xn(m.balanceErrorKwh,0));
+});
+t('X9 zakup po strefie godziny rozładowania, depozyt po cenie godziny ładowania', () => {
+  const r=xs([xh('2026-07-01',18,0,5,{rce:400,rate:.9}),
+    xh('2026-07-01',19,1,0,{rce:9999,rate:1.5}), xh('2026-07-01',20,2,0,{rce:9999,rate:.63})]);
+  xn(r.total.purchaseSavingsPln,2.76); xn(r.total.lostDepositPln,2.46); xn(r.total.netPln,.30);
+});
+t('X10 RCE 0 jest znaną ceną; ujemne RCE zgodnie z Depozytem daje 0', () => {
+  [0,-500].forEach(price=>{
+    const r=xs([xh('2026-07-01',12,0,2,{rce:price}),xh('2026-07-01',13,2,0)]);
+    assert.strictEqual(r.total.netKnown,true); xn(r.total.lostDepositPln,0); xn(r.total.netPln,3);
+  });
+});
+t('X11 null/puste/undefined RCE nie może udawać darmowego ładowania', () => {
+  [null,'',undefined].forEach(price=>{
+    const r=xs(xPair(),{rceOf:()=>price});
+    assert.strictEqual(r.total.lostDepositPln,null); assert.strictEqual(r.total.netPln,null);
+    xn(r.total.unpricedChargeKwh,5);
+  });
+});
+t('X12 brak G13 to nieznany zakup, nigdy stawka zastępcza', () => {
+  [null,'',undefined].forEach(rate=>{
+    const r=xs(xPair(),{rateOf:()=>rate,manualRatePlnKwh:9});
+    assert.strictEqual(r.total.purchaseSavingsPln,null); assert.strictEqual(r.total.netPln,null);
+    xn(r.total.unpricedDischargeKwh,3);
+  });
+});
+t('X13 ceny zbędne przy zerowych ZMIANACH przepływów', () => {
+  const r=xs([xh('2026-07-01',12,0,0)],{rateOf:()=>null,rceOf:()=>null});
+  assert.strictEqual(r.total.netKnown,true); xn(r.total.netPln,0);
+});
+t('X14 nawet 90% pokrycia RCE nie wystarcza do pełnego wyniku rozbudowy', () => {
+  const rows=Array.from({length:10},(_,h)=>xh('2026-07-01',h,0,.1,{rce:h===9?null:400}));
+  rows.push(xh('2026-07-01',10,2,0)); const r=xs(rows);
+  xn(r.total.unpricedChargeKwh,.1); assert.strictEqual(r.total.netKnown,false);
+});
+t('X15 luka odcina SOC — nie teleportuje darmowej energii przez brak danych', () => {
+  const r=xs([xh('2026-07-01',12,0,4),xh('2026-07-01',14,3,0)]);
+  xn(r.total.dischargeKwh,0); xn(r.total.discardedKwh,4); xn(r.total.balanceErrorKwh,0);
+  assert.strictEqual(r.gapHours,1); assert.strictEqual(r.gapCount,1); assert.strictEqual(r.annualNetPln,null);
+});
+t('X16 znane godziny zerowe nie przerywają SOC', () => {
+  const rows=Array.from({length:8},(_,i)=>xh('2026-07-01',12+i,0,0));
+  rows[0].oddaniePoZbil=4; rows[7].poborPoZbil=3;
+  const r=xs(rows); xn(r.total.dischargeKwh,3); assert.strictEqual(r.gapCount,0);
+});
+t('X17 wiosenna zmiana czasu 01->03 to ciągłość, nie luka', () => {
+  const r=xs([xh('2026-03-29',1,0,4),xh('2026-03-29',3,3,0)]);
+  assert.strictEqual(r.gapCount,0); assert.strictEqual(r.total.hours,2); xn(r.total.dischargeKwh,3);
+});
+t('X18 jesienna podwójna godzina bez przepływów jest neutralna (2 h)', () => {
+  const r=xs([xh('2026-10-25',1,0,4),xh('2026-10-25',2,0,0),xh('2026-10-25',3,3,0)]);
+  assert.strictEqual(r.gapCount,0); assert.strictEqual(r.total.hours,4);
+  assert.strictEqual(r.dstNeutralKeys,1); xn(r.total.dischargeKwh,3); assert.strictEqual(r.total.netKnown,true);
+});
+t('X19 jesienna podwójna godzina Z przepływem: nie zgadujemy kolejności/ceny', () => {
+  const r=xs([xh('2026-10-25',1,0,4),xh('2026-10-25',2,0,2),xh('2026-10-25',3,3,0)]);
+  assert.strictEqual(r.total.badHours,2); assert.strictEqual(r.total.netPln,null);
+  xn(r.total.dischargeKwh,0); xn(r.total.discardedKwh,4);
+});
+t('X20 jednoczesny import i eksport przerywa model, nie tworzy cyklu w ciemno', () => {
+  const r=xs([xh('2026-07-01',12,0,4),xh('2026-07-01',13,2,2),xh('2026-07-01',14,3,0)]);
+  assert.strictEqual(r.total.badHours,1); assert.strictEqual(r.total.netPln,null); xn(r.total.dischargeKwh,0);
+});
+t('X21 brak energii lub brak kierunku w nowym imporcie to nie zero', () => {
+  [null,'',undefined,-1,NaN].forEach(val=>{
+    const r=xs([xh('2026-07-01',12,val,2)]);
+    assert.ok(r.total.badHours>0); assert.strictEqual(r.total.netPln,null);
+  });
+  const r=xs([xh('2026-07-01',12,0,2,{hasImport:false})]);
+  assert.strictEqual(r.total.badHours,1); assert.strictEqual(r.total.netPln,null);
+});
+t('X22 duplikat godziny nie może podwoić ładowania', () => {
+  const r=xs([xh('2026-07-01',12,0,2),xh('2026-07-01',12,0,2),xh('2026-07-01',13,4,0)]);
+  assert.strictEqual(r.duplicateKeys,1); xn(r.total.chargeKwh,0); assert.strictEqual(r.total.netPln,null);
+});
+t('X23 chronologia niezależna od kolejności wejścia, bez mutowania tablicy', () => {
+  const rows=xPair().reverse().map(Object.freeze); Object.freeze(rows);
+  assert.deepStrictEqual(xs(rows).total,xs(xPair()).total);
+  assert.strictEqual(rows[0].hour,13);
+});
+t('X24 niepoprawne parametry/daty blokują wynik zamiast cichego defaultu', () => {
+  [{capacityKwh:null},{capacityKwh:-1},{efficiency:0},{efficiency:1.1},
+    {chargeKw:-1},{dischargeKw:'x'},{startDate:'2026-07-32'},
+    {startDate:'2026-08-01',endDate:'2026-07-01'}].forEach(o=>assert.strictEqual(xs(xPair(),o).valid,false));
+});
+t('X25 zakres dat zaczyna od pustego SOC, nie wnosi energii sprzed okresu', () => {
+  const r=xs([xh('2026-06-30',23,0,4),xh('2026-07-01',0,3,0)],{startDate:'2026-07-01'});
+  assert.strictEqual(r.firstDate,'2026-07-01'); xn(r.total.chargeKwh,0); xn(r.total.dischargeKwh,0);
+});
+t('X26 kapitał obu magazynów nie zmienia przepływów ani zysku okresu', () => {
+  assert.deepStrictEqual(xs(xPair(),{costPln:2000,batCostPln:5000}).total,
+    xs(xPair(),{costPln:20000,batCostPln:9999}).total);
+});
+t('X27 przeliczenie roczne po godzinach dopiero od 720 h, nie po liczbie miesięcy', () => {
+  const rows=Array.from({length:720},(_,h)=>{
+    const dt=new Date(Date.UTC(2026,3,1)+h*3600000);
+    return xh(dt.toISOString().slice(0,10),dt.getUTCHours(),h===1?1:0,h===0?1:0);
+  });
+  const r=xs(rows); assert.strictEqual(r.total.hours,720); xn(r.annualNetPln,1.008*8760/720);
+  assert.strictEqual(xs(rows.slice(0,719)).annualNetPln,null);
+  const gap=rows.filter((_,i)=>i!==100); assert.strictEqual(xs(gap).annualNetPln,null);
+});
+t('X28 bilans i ograniczenia na 1000 deterministycznych godzinach z lukami', () => {
+  let seed=58; function rnd(){seed=(seed*1664525+1013904223)>>>0;return seed/4294967296;}
+  const rows=[];
+  for(let h=0;h<1000;h++){
+    if(h%109===108)continue;
+    const dt=new Date(Date.UTC(2026,5,1)+h*3600000), exp=rnd()>.48;
+    const n=rnd()*9;
+    rows.push(xh(dt.toISOString().slice(0,10),dt.getUTCHours(),exp?0:n,exp?n:0));
+  }
+  const r=xs(rows,{capacityKwh:7.3,efficiency:.88,chargeKw:3.2,dischargeKw:2.4});
+  xn(r.total.balanceErrorKwh,0,1e-7);
+  Object.values(r.months).forEach(m=>xn(m.balanceErrorKwh,0,1e-7));
+  r.hourly.forEach(h=>{
+    assert.ok(h.socKwh>=-1e-8 && h.socKwh<=7.3+1e-8);
+    assert.ok(h.chargeKwh<=Math.min(h.oldExportKwh,3.2)+1e-8);
+    assert.ok(h.dischargeKwh<=Math.min(h.oldImportKwh,2.4)+1e-8);
+    assert.ok(h.newImportKwh>=-1e-8 && h.newExportKwh>=-1e-8);
+  });
+  assert.ok(r.total.dischargeKwh<=r.total.chargeKwh*.88+1e-8);
+});
+t('X29 wysoka cena sprzedaży może dać ujemny wynik — nie wymuszamy opłacalności', () => {
+  const rows=[xh('2026-07-01',12,0,2,{rce:1500}),xh('2026-07-01',13,2,0,{rate:.63})];
+  const r=xs(rows); xn(r.total.netPln,1.26-3.69); assert.ok(r.total.netPln<0);
+});
+t('X30 depozyt ×1,23 tylko od obowiązującej daty, nie zaszyty dla każdego roku', () => {
+  const r=xs([xh('2025-01-01',12,0,2,{rce:500}),xh('2025-01-01',13,2,0)]);
+  xn(r.total.lostDepositPln,1);
+});
+t('X31 brak danych wejściowych nie staje się prognozą z zerowym zyskiem', () => {
+  const r=xs(null); assert.strictEqual(r.total.netPln,null); assert.strictEqual(r.annualNetPln,null);
+  assert.ok(/Brak/.test(r.reason));
+});
+t('X32 nieistniejąca godzina wiosenna/niepoprawna data są wykrywane', () => {
+  const r=xs([xh('2026-03-29',2,0,4),xh('2026-02-30',12,0,4)]);
+  assert.strictEqual(r.invalidRows,2); assert.strictEqual(r.total.netPln,null);
+});
+
+t('X33 jesienne 0,034+0,039 kWh importu: ta sama strefa, bez wiążącego limitu mocy', () => {
+  const rows=[xh('2026-10-25',1,0,4),xh('2026-10-25',2,.073,0,{rate:.63}),xh('2026-10-25',3,0,0)];
+  [null,.1,0].forEach(power=>{
+    const r=xs(rows,{dischargeKw:power});
+    assert.strictEqual(r.total.netKnown,true); assert.strictEqual(r.total.hours,4);
+    xn(r.total.dischargeKwh,power===0?0:.073);
+    xn(r.total.purchaseSavingsPln,(power===0?0:.073)*.63);
+  });
+  const limited=xs(rows,{dischargeKw:.05});
+  assert.strictEqual(limited.total.netPln,null,'bez podziału na obie godziny limit 0,05 kW jest niejednoznaczny');
+  xn(xs(rows,{capacityKwh:0}).total.netPln,0);
+});
+
+t('X34 dodatkowe 0 kWh także w jesiennej godzinie eksportu daje zero, nie cenę z domysłu', () => {
+  const r=xs([xh('2026-10-25',2,0,3)],{capacityKwh:0,rceOf:()=>null});
+  xn(r.total.netPln,0); xn(r.total.newExportKwh,3); assert.strictEqual(r.dstImportKeys,0);
+});
+
 // sprzątanie
 fs.rmSync(TMP, { recursive: true, force: true });
 
