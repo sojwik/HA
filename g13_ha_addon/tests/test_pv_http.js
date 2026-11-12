@@ -2,7 +2,7 @@
 // Prawdziwy Express + KV, ale HA zastąpione lokalnym stubem. Zero urządzeń/sieci HA.
 const assert = require('assert'), fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
 const { spawn } = require('child_process');
-const S = require('../app/public/pv-store'), D = require('../app/public/pv-data'), F = require('./pv-fixture');
+const S = require('../app/public/pv-store'), D = require('../app/public/pv-data'), X = require('../app/public/pv-export'), F = require('./pv-fixture');
 const APP = path.resolve(__dirname, '../app'), TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'g13pv-http-'));
 const PORT = 8297, BASE = 'http://127.0.0.1:' + PORT;
 let passed = 0, failed = 0, proc;
@@ -39,7 +39,7 @@ const original = require(id); const fake = Object.assign({}, original, {
   });
   console.log('\n=== PV: prawdziwy HTTP/KV i cache zasobów ===');
   const html = await (await fetch(BASE + '/')).text();
-  for (const asset of ['pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js']) {
+  for (const asset of ['pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js', 'pv-export.js']) {
     await test('HTTP asset ' + asset + ': lokalny, prawidłowy tag treści i no-cache', async () => {
       const hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(APP, 'public', asset))).digest('hex');
       assert.ok(html.includes(asset + '?v=' + String(parseInt(hash.slice(0, 12), 16))));
@@ -88,6 +88,17 @@ const original = require(id); const fake = Object.assign({}, original, {
     await st.saveGridDataset(grid); const read = D.validateGridDataset(await S.create(kv).loadGridDataset());
     assert.deepStrictEqual(read, grid); assert.strictEqual((await kv.get('monthly-ledger')).value, legacy);
     assert.ok((await kv.get(S.prefix + 'active')).value); // historia HA również zachowana
+  });
+  await test('HTTP eksport ma osobny aktywny manifest, pełna historia i ledger zachowane', async () => {
+    const st = S.create(kv), old = (await kv.get(S.prefix + 'active')).value;
+    const minimal = Object.fromEntries(X.entityIds(f.settings).map(id => [id, f.series[id]]));
+    await st.saveExportDataset(minimal, X.signature(f.settings));
+    const cached = await st.loadExportDataset(); assert.deepStrictEqual(D.mergeSeries(cached.parts), D.mergeSeries([minimal]));
+    assert.strictEqual((await kv.get(S.prefix + 'active')).value, old); assert.strictEqual((await kv.get('monthly-ledger')).value, legacy);
+  });
+  await test('HTTP eksportowe shardy mieszczą się w tym samym ograniczeniu 2 MB KV', async () => {
+    const manifest = JSON.parse((await kv.get(S.prefix + 'export-active')).value);
+    for (const key of manifest.keys) { const value = (await kv.get(key)).value; assert.ok(Buffer.byteLength(JSON.stringify({value})) < 1800000); }
   });
   await test('HTTP reset usuwa tylko PV; health/ledger i starsze zasoby pozostają poprawne', async () => {
     await S.create(kv).reset(); assert.deepStrictEqual((await kv.list(S.prefix)).keys, []);

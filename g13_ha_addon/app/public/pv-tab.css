@@ -25,3 +25,9 @@
 #tab-pv .table-scroll{margin:1rem 0}#tab-pv button:disabled{opacity:.45;cursor:not-allowed}
 @media(max-width:900px){#tab-pv .pv-grid{grid-template-columns:repeat(2,minmax(0,1fr))}#tab-pv .pv-period{grid-template-columns:1fr 1fr}#tab-pv .pv-wide{grid-column:1/-1}#tab-pv .pv-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:560px){#tab-pv .pv-grid,#tab-pv #pvEntities{grid-template-columns:1fr}#tab-pv .pv-metric strong{font-size:1rem}#tab-pv .pv-heading{align-items:flex-start}#tab-pv .pv-actions button{width:100%}}
+
+/* Both modes keep their own fields; hidden controls must stay hidden even with flex/grid. */
+#tab-pv [hidden]{display:none!important}
+#tab-pv .pv-mode-selector{margin:1rem 0}
+
+#tab-pv[data-calculation-mode="export_only"] .pv-period{grid-template-columns:repeat(2,minmax(0,1fr))}
