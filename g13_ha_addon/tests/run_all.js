@@ -16,6 +16,8 @@ const SUITES = [
   ['PV — dodatkowa produkcja jako eksport', 'test_pv_export.js'],
   ['PV — osobny zapis trybu eksportu', 'test_pv_export_store.js'],
   ['PV — eksport w prawdziwym DOM', 'test_pv_export_dom.js'],
+  ['PV — roczny szacunek i ROI', 'test_pv_annual.js'],
+  ['PV — roczny szacunek w prawdziwym DOM', 'test_pv_annual_dom.js'],
   ['PV — rzeczywisty protokół recorder i HTTP', 'test_pv_recorder_http.js'],
   ['PV — prosty formularz, ampery i założenia strat', 'test_pv_form.js'],
   ['PV — izolacja DOM', 'test_pv_dom.js'],

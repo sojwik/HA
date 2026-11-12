@@ -1,3 +1,73 @@
+# Rozbudowa PV 0.3.9 — osobny „Szacunek roczny + ROI”
+
+**Nowy tryb jest estymatorem z jawnych założeń, nie rekonstrukcją pomiarów.** Odpowiada na pytanie o orientacyjną roczną wartość dołożonych paneli i prosty zwrot samej rozbudowy, bez wymagania kompletnych godzin HA/eLicznika/RCE. Nie uzupełnia luk, nie zeruje nieznanych pomiarów i nie annualizuje krótkiego okresu.
+
+Pozostają trzy wybierane jawnie tryby:
+
+1. **Szacunek roczny + ROI** — niezależny rachunek z poniższych założeń.
+2. **Dodatkowa produkcja PV wyceniona jako eksport** — zachowany model godzinowy 0.3.8 i jego walidacja.
+3. **Dynamiczna praca istniejącej baterii** — zachowany wcześniejszy model wraz z kontrolami H, SOC, A/V i sprawności.
+
+Wcześniej zapisany tryb nie zmienia się sam. Dawne ustawienia bez pola trybu nadal oznaczają model baterii. Nowy niezapisany formularz zachowuje dotychczasowy domyślny wybór eksportu godzinowego; estymator wybiera się z listy raz. Zmiana trybu lub rocznych założeń unieważnia zgodę i wynik, ale nie usuwa parametrów, historii ani CSV.
+
+## Założenia i wzory
+
+Podstawowy formularz roczny pokazuje tylko cztery pola: dołożone kWp, koszt samej rozbudowy, roczny uzysk AC i środkową wartość przypisu depozytu za kWh. W zaawansowanych pozostają wykorzystanie depozytu i rozpiętość cen; bieżąca rozpiętość jest opisana także w widocznym komunikacie. Wszystkie założenia pokazuje wynik.
+
+```
+E_AC_rocznie = dołożone_kWp × uzysk_AC_kWh_na_kWp_rocznie
+P_wariantu  = środkowa_wartość_depozytu × (1 − rozpiętość, 1, 1 + rozpiętość)
+przypis     = E_AC_rocznie × P_wariantu
+korzyść     = przypis × wykorzystanie_depozytu
+prosty_zwrot_lata = koszt_samej_rozbudowy / korzyść
+prosta_roczna_stopa_zwrotu_% = korzyść / koszt_samej_rozbudowy × 100
+```
+
+- Początkowe **1000 kWh AC/kWp/rok**, **0,30 zł/kWh** i **±30% ceny** to **edytowalne przykłady**, nie pomiary, kalibracja, wynik PVGIS lub prognoza cen. Nie są dobierane z kilku tygodni historii. Wartości wymagają własnej oceny dla położenia, orientacji, zacienienia i sposobu rozliczenia.
+- Uzysk **AC** jest już po założonych stratach i ograniczeniach. Nie mnożymy go drugi raz przez 95%, sprawności baterii, historyczny współczynnik DC ani limity falownika/eksportu z innego trybu. Nie potwierdzamy w ten sposób żadnego sprzętu lub projektu podłączenia.
+- Cena oznacza **gotową kwotę przypisu depozytu za kWh**, już po zasadach rozliczenia. To nie surowa RCE w zł/MWh; nie doliczamy ponownie mnożnika 1,23. Wartość ujemna jest odrzucana, a jawne 0 jest dopuszczalne.
+- Całą przyjętą dodatkową energię AC wyceniamy z założenia jako eksport. Rzeczywista autokonsumpcja, bateria lub ograniczenia mogą dać inny efekt. Nie naliczamy jednocześnie dodatkowych oszczędności zakupu G13 lub korzyści magazynu.
+- **Depozyt nie jest gotówką.** Liczy się marginalne wykorzystanie dodatkowego przypisu, nie samo saldo ani historyczne zużycie całego depozytu. 100% jest scenariuszem, nie gwarancją wykorzystania.
+- Koszt dotyczy **całej samej rozbudowy**, np. paneli, montażu i dodatkowego osprzętu; nie dodajemy automatycznie kosztu istniejącej instalacji lub baterii.
+- Warianty **ostrożny / środkowy / korzystny** zmieniają **tylko cenę**, przy tej samej energii i wykorzystaniu. To umowna analiza wrażliwości, **nie statystyczny przedział ufności ani gwarancja, że wynik rzeczywisty się w nim znajdzie**. ±0% daje trzy identyczne scenariusze; przy ±100% ostrożny ma cenę 0.
+- Przy zerowej energii/cenie/wykorzystaniu korzyść wynosi 0 i nie ma skończonego zwrotu. Przy pustym lub zerowym koszcie energia/korzyść nadal są obliczane, ale ROI i okres zwrotu pozostają nieznane; nie prezentujemy natychmiastowego zwrotu. Pusty uzysk lub cena nie są zamieniane na zero.
+- Prosty zwrot zakłada powtarzalną roczną korzyść. Pomija degradację, serwis, finansowanie, dyskontowanie i przyszłe zmiany cen/przepisów. To nie NPV, IRR ani rekomendacja inwestycyjna.
+
+## Historia jako opcjonalny punkt odniesienia
+
+Roczny przycisk obliczeń nie uruchamia przygotowania godzin, pobierania HA ani odczytu cen/eLicznika; nie czeka na gotowość danych legacy. W tym trybie wyłączone są również planowanie i wykonanie zachowanego automatycznego odświeżania HA. Parametr autoRefresh nie jest tracony — działa ponownie dopiero w trybie historycznym.
+
+W osobnym rozwijanym panelu można nacisnąć **„Porównaj z zapisanym okresem — tylko odczyt”**:
+
+- Używa wyłącznie już zapisanej, zgodnej całej historii oraz zachowanych dat/założeń modelu eksportowego. Nie pobiera HA, nie importuje ponownie CSV i nie skleja godzin kilku zbiorów.
+- Odniesienie to **przypis dodatkowego depozytu / modelowy przyrost eksportu**, ważone produkcją tego okresu, nie średnia taryfa lub przypis całej istniejącej instalacji. Do tego odrębnego historycznego wyniku nadal potrzebne są poprawne wejścia; dodatni eksport z niepełną ceną nie udaje kompletnej średniej.
+- Brak historii, luki, brak zgody DST lub brak pełnej wyceny uniemożliwiają tylko to opcjonalne odniesienie, **nie roczne obliczenie**. Nie ma automatycznej naprawy lub domyślnego zera.
+- Wynik odniesienia pokazuje daty, godziny, energię, przypis i cenę okresu. **Nic nie jest automatycznie przepisywane.** Osobny przycisk świadomego użycia ceny przenosi ją jako własne założenie roczne, zapisuje pochodzenie i wymaga nowej zgody.
+- Nawet po świadomym przyjęciu ceny okresu roczna energia pochodzi z osobno wpisanego uzysku AC. Nie przeliczamy kilku tygodni na rok. Opis dat pozostaje widoczny po ponownym otwarciu; ręczna zmiana ceny usuwa ten opis pochodzenia.
+- Spóźniony wynik odniesienia jest unieważniany po zmianie ustawień/trybu. Wynik roczny nie jest zapisywany do salda rzeczywistego.
+
+## Izolacja i zachowanie zapisów
+
+`pv-annual.js` jest czystym modułem obliczeniowym bez DOM, sieci, HA i KV. `pv-tab.js` wybiera ścieżkę roczną **przed** kontrolami godzinowymi. Ustawienia i opis świadomie wybranej ceny są zapisane tylko w dotychczasowej przestrzeni `pv-sim-v1-`; wynik nie zmienia rozliczeń ani kalkulatora dodatkowej baterii.
+
+Uszkodzona opcjonalna historia nie jest nadpisywana/czyszczona i nie blokuje rocznego wyniku, jeśli same ustawienia zostały poprawnie odczytane. Przy uszkodzonym zapisie ustawień nadal odmawiamy jego cichego nadpisania. Błąd zapisu ma jawny komunikat „tylko w pamięci”.
+
+**Bez zmian bajtowych względem 0.3.8:** `pv-model.js`, `pv-data.js`, `pv-form.js`, `pv-export.js`, `pv-store.js`, backend recorder/HA/KV, walidatory i biblioteka XLSX. `index.html` otrzymuje tylko względny lokalny skrypt `pv-annual.js`, serwer tylko jego tag treści/cache. Zależności npm nie zmieniają się. Dokumentacja wcześniejszych trybów poniżej ma charakter zachowanego kontraktu, a nie bieżącej instrukcji instalacji.
+
+## Obsługa i dostawa 0.3.9
+
+W zwykłym UI wybierz **„Szacunek roczny + ROI — bez kompletnej historii HA”**, sprawdź cztery podstawowe pola oraz wykorzystanie/rozpiętość, zaakceptuj założenia i oblicz. Nie wybieraj dat, nie pobieraj HA ani nie importuj ponownie CSV tylko po to, by uruchomić roczny szacunek. Opcjonalne odniesienie nie jest etapem obowiązkowym.
+
+Procedura aktualizacji: **Git + PowerShell, bez Node/npm, testów PC, konsoli przeglądarki i wymogu wklejania logów**. Paczka sprawdza dokładną bazę 0.3.8, czystość klona, pełne hashe i zakres zmian. Pytania są w bieżącym PowerShellu; bezinteraktywny instalator robi DryRun, potem zastosowanie po sukcesie. Istniejący klon używany jest tylko po jawnym wskazaniu; nie jest resetowany, kasowany ani zastępowany po błędzie. Standardowo powstaje nowy unikalny klon. Opcjonalna publikacja wymaga osobnego dokładnego `TAK`; PR/scalenie i aktualizacja HA są osobnymi czynnościami użytkownika. Asystent nie wykonuje tych działań.
+
+Testy przygotowania obejmują stare regresje, arytmetykę roczną, 1200 deterministycznych zestawów założeń, błędne/puste/zerowe parametry, DOM, zapis i ponowne otwarcie, przełączanie trybów, opóźnione odniesienie, błędy historii/zapisu, zakaz pobrań HA w trybie rocznym oraz rzeczywisty HTTP/KV/cache zasobów. Testy mutacyjne sprawdzają wykrywanie celowo wprowadzonych błędów. Są to testy w środowisku przygotowania, **nie na komputerze/HA użytkownika i nie walidacja fizyczna**. Prywatne eksporty oraz szczegółowe wyniki użytkownika pozostają poza publicznym payloadem.
+
+---
+
+# Zachowany opis wydania 0.3.8 — poniższe wymagania godzinowe dotyczą tylko trybów historycznych
+
+Opis „bez rocznego zwrotu” poniżej nadal obowiązuje w godzinowym modelu eksportu. Nie jest ograniczeniem nowego, jawnie założeniowego estymatora rocznego opisanego powyżej. Historyczna procedura instalacji 0.3.8 nie zastępuje procedury aktualizacji 0.3.9.
+
 # Rozbudowa PV 0.3.8 — dwa jawnie oddzielone sposoby liczenia
 
 ## Nowy prosty tryb: dodatkowa produkcja PV wyceniona jako eksport
