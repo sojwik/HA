@@ -12,10 +12,12 @@
   const SHARD = /^pv-sim-v1-data-[a-z0-9-]+-\d{4}$/;
   const EXPORT_ACTIVE = PREFIX + 'export-active';
   const EXPORT_SHARD = /^pv-sim-v1-export-data-[a-z0-9-]+-\d{4}$/;
+  const AVAILABLE_ACTIVE = PREFIX + 'available-active';
+  const AVAILABLE_SHARD = /^pv-sim-v1-available-data-[a-z0-9-]+-\d{4}$/;
   const GRID_ACTIVE = PREFIX + 'grid-active';
   const GRID_SHARD = /^pv-sim-v1-grid-[a-z0-9-]+-\d{4}$/;
-  const allowed = key => key === SETTINGS || key === ACTIVE || key === EXPORT_ACTIVE || key === GRID_ACTIVE
-    || SHARD.test(key) || EXPORT_SHARD.test(key) || GRID_SHARD.test(key);
+  const allowed = key => key === SETTINGS || key === ACTIVE || key === EXPORT_ACTIVE || key === AVAILABLE_ACTIVE || key === GRID_ACTIVE
+    || SHARD.test(key) || EXPORT_SHARD.test(key) || AVAILABLE_SHARD.test(key) || GRID_SHARD.test(key);
   function create(storage) {
     if (!storage || !['get', 'set', 'delete', 'list'].every(k => typeof storage[k] === 'function')) throw new Error('Brak magazynu KV dla karty PV.');
     let tail = Promise.resolve(), seq = 0;
@@ -113,6 +115,8 @@
     function saveDataset(series, signature) { return saveCollection(series, signature, ACTIVE, SHARD, 'data', 'series'); }
     function loadExportDataset() { return loadCollection(EXPORT_ACTIVE, EXPORT_SHARD, 'export-data', 'series'); }
     function saveExportDataset(series, signature) { return saveCollection(series, signature, EXPORT_ACTIVE, EXPORT_SHARD, 'export-data', 'series'); }
+    function loadAvailableDataset() { return loadCollection(AVAILABLE_ACTIVE, AVAILABLE_SHARD, 'available-data', 'series'); }
+    function saveAvailableDataset(series, signature) { return saveCollection(series, signature, AVAILABLE_ACTIVE, AVAILABLE_SHARD, 'available-data', 'series'); }
     async function loadGridDataset() {
       const m = await loadCollection(GRID_ACTIVE, GRID_SHARD, 'grid', 'records');
       if (!m) return null;
@@ -137,11 +141,12 @@
         // referencji do usuniętych części. Awaria nie rusza cudzych kluczy.
         await storage.delete(ACTIVE);
         await storage.delete(EXPORT_ACTIVE);
+        await storage.delete(AVAILABLE_ACTIVE);
         await storage.delete(GRID_ACTIVE);
-        for (const key of await ownKeys()) if (key !== ACTIVE && key !== EXPORT_ACTIVE && key !== GRID_ACTIVE) await storage.delete(key);
+        for (const key of await ownKeys()) if (key !== ACTIVE && key !== EXPORT_ACTIVE && key !== AVAILABLE_ACTIVE && key !== GRID_ACTIVE) await storage.delete(key);
       });
     }
-    return Object.freeze({ loadSettings, saveSettings, loadDataset, saveDataset, loadExportDataset, saveExportDataset, loadGridDataset, saveGridDataset, reset });
+    return Object.freeze({ loadSettings, saveSettings, loadDataset, saveDataset, loadExportDataset, saveExportDataset, loadAvailableDataset, saveAvailableDataset, loadGridDataset, saveGridDataset, reset });
   }
   return Object.freeze({ create, prefix: PREFIX });
 });

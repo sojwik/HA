@@ -1,3 +1,115 @@
+# Rozbudowa PV 0.4.0 — dostępne godziny + roczny ROI: zużycie → eksport
+
+Nowy **czwarty, jawnie wybierany tryb**: „Dostępne godziny + roczny ROI — zużycie → eksport, bez symulacji baterii”. Nie wymaga 100% poprawnych godzin całego okresu. Nie naprawia historii i nie zmienia dotychczasowych trybów, ich wymagań lub salda rzeczywistego.
+
+**Nie wyceniamy całego przyrostu jako eksportu.** Dodatkowe PV najpierw zmniejsza historyczny godzinowy pobór z sieci; dopiero reszta jest nadwyżką do eksportu. Pobór z eLicznika jest przyjętym przybliżeniem niezaspokojonego zużycia: może obejmować ładowanie baterii, nie jest osobnym pomiarem samego domu. Nie rekonstruujemy H, SOC ani zmienionej pracy magazynu. Pominięcie modelowania baterii nie oznacza jej fizycznego odłączenia.
+
+## Przepływy i wycena
+
+Dla użytecznej godziny UTC:
+
+```
+nowe_DC = historyczne_PV_DC × dodatkowe_kWp / obecne_kWp × względny_uzysk
+```
+
+Konwersja i limit falownika mają ten sam kontrakt co historyczny eksport 0.3.8:
+
+- wspólny DC: `dodatkowe_AC = min((PV + nowe_DC) × η, limit) − min(PV × η, limit)`;
+- osobny falownik AC: `dodatkowe_AC = min(nowe_DC × η, limit_nowego_falownika)`.
+
+To krzywe samego PV, nie pomiar wolnego budżetu hybrydy z baterią lub gwarancja limitów chwilowych/MPPT.
+
+Następnie:
+
+```
+zmniejszenie_poboru = min(dodatkowe_AC, potwierdzony_pobór_eLicznika)
+nadwyżka            = dodatkowe_AC − zmniejszenie_poboru
+wolny_limit         = max(0, limit_eksportu − historyczny_eksport)
+nowy_eksport        = min(nadwyżka, wolny_limit)
+niewykorzystane_AC  = nadwyżka − nowy_eksport
+
+oszczędność_zakupu  = zmniejszenie_poboru × zapisana_stawka_strefy_G13
+przypis_depozytu    = nowy_eksport × przeliczenie_RCE_tej_godziny
+```
+
+Przykładowo: 3 kWh dodatkowego AC i 1 kWh poboru oznacza 1 kWh mniej zakupu i maksymalnie 2 kWh eksportu, **nie sprzedaż wszystkich 3 kWh**. Danej kWh nie wyceniamy podwójnie.
+
+- **RCE jest historyczne, przypisane do tej samej godziny.** Nie używamy ręcznej ceny 0,30 zł/kWh ani średniej arytmetycznej wszystkich cen, w tym nocy. Niezmienione `pv-model.sellPrice`: ujemna RCE → 0, PLN/MWh → PLN/kWh, współczynnik 1,23 od lutego 2025. To kontynuacja dotychczasowej reguły PV, nie nowa interpretacja przepisów.
+- **Zakup G13 korzysta z aktualnie zapisanych stawek strefowych**, nie z datowanego archiwum zmian taryfy. UI mówi o tym wprost; nie obiecujemy odtworzenia każdej dawnej ceny zakupu, której aplikacja nie posiada. Brak strefy/ceny nie jest zastępowany zerem ani stawką domyślną.
+- Limit eksportu dotyczy dopiero nadwyżki. **0 kW eksportu nie blokuje zużycia na miejscu.** Historyczny eksport nie jest obcinany. Pusty limit nie oznacza braku limitu; taki wariant wymaga istniejącego jawnego checkboxa.
+- Przy nieznanym poborze nie zakładamy, że pobór wynosi 0 i całe PV można sprzedać. Przy znanym poborze i nieznanym eksporcie można nadal wycenić zmniejszenie zakupu; nadwyżka z ograniczeniem eksportowym pozostaje niewyznaczona. Jawny brak limitu usuwa tę zależność, nie tworzy pomiaru eksportu.
+
+## Co oznacza wykorzystanie przez dom — a czego nie oznacza
+
+**Fizyczny udział zużycia obliczamy godzinowo**, nie ustawiamy go na 100% produkcji. Dopiero nadwyżka trafia na eksport.
+
+**Finansowo przyjmujemy pełną wartość dodatkowego przypisu do wykorzystania na późniejsze rozliczenie energii pobranej dla domu.** Nie używamy `refundRate`, mnożnika wypłaty 30%, zakresu ±30% ani procentu wykorzystania z innych trybów. Ich zapisane wartości pozostają zachowane, ale nie sterują nowym trybem. To jawne założenie wykorzystania środków, nie gwarancja wykorzystania i nie wypłata gotówkowa.
+
+Osobnego wariantu zwrotu niewykorzystanego depozytu w gotówce **nie dodano w tym wydaniu**. Nie sumujemy takiego zwrotu z wykorzystaniem tego samego depozytu i nie nazywamy go sprzedażą całego salda.
+
+## Dostępne godziny zamiast blokady całego zakresu
+
+- Wykorzystujemy poprawnie zapisany PV DC, a nie proporcjonalnie powiększony eksport eLicznika. Dla licznika nadal potrzebne są `change`, poprzednia godzina/bufor i brak sprzeczności `change` z Δsum. Nie zastępujemy PV średnią mocą, nie przesuwamy godzin, nie obcinamy ujemnych przyrostów.
+- **W nowym trybie nieużyteczna godzina nie blokuje innych.** Pozostaje w źródle; raport zawiera liczbę godzin, powody i listę niepełnych przedziałów. Nie zapisujemy pominięcia jako zmierzonego zera.
+- Znane podsumy zakupu i depozytu są osobne. Brak ceny RCE nie kasuje znanej oszczędności zakupu; brak ceny zakupu nie kasuje znanego przypisu. Znane kWh bez ceny pokazujemy oddzielnie. Przy braku PV nie wymyślamy nieznanych kWh.
+- Zero dodatkowej energii nie wymaga ceny, ale nie oznacza potwierdzenia zerowych historycznych przepływów. Zero zapisanej ceny jest prawidłową wartością; brak ceny pozostaje brakiem.
+- **Powtórzona godzina jesienna** bez jednoznacznego dopasowania przepływów/cen zostaje wyłączona z tego szacunku (2 h UTC), nie blokując reszty. Nie przypisujemy jednej ceny do dwóch foldów. Pozostałe tryby zachowują własny kontrakt DST i zgodę na agregację.
+- Konflikt między źródłami wyłącza odpowiednią godzinę, nie jest rozstrzygany wyborem korzystniejszej wartości. Nie sumujemy źródeł ani nie dopisujemy flag.
+- Brak całego profilu daje raport bez podstaw do rocznego ROI, nie fikcyjną prognozę z 0,30 zł. Nadal wymagane są sensowne jawne parametry formularza oraz bezpieczny format zapisu; „bez blokad za luki” nie oznacza akceptacji uszkodzonego JSON lub przypadkowych jednostek.
+
+Wynik jest **znaną podsumą z dostępnych danych**, a nie pełną kwotą okresu lub gwarantowaną dolną granicą rzeczywistej korzyści. Pokrycie oraz miesięczne części okresu pozostają widoczne.
+
+## Osobny roczny szacunek i ROI
+
+Pole **„Roczny uzysk AC do podziału · kWh/kWp/rok”** jest osobne od założeń manualnego estymatora 0.3.9. Startowe **1000** to edytowalny przykład, nie pomiar, kalibracja lub wynik PVGIS. Oznacza energię po konwersji/limicie falownika, **przed podziałem** na zmniejszenie poboru, eksport i niewykorzystaną nadwyżkę. Brak/nieprawidłowy uzysk nie blokuje historycznych podsum — wyłącza tylko roczny wynik.
+
+Do rocznego odniesienia bierzemy **wyłącznie te godziny, w których cały dodatkowy strumień AC ma znany podział i pełną potrzebną wycenę**. Ich dodatkowe AC jest wspólnym mianownikiem:
+
+```
+wartość_zakupu_na_AC = suma_oszczędności_zakupu_w_próbie / suma_dodatkowego_AC_w_próbie
+wartość_depozytu_na_AC = suma_przypisu_w_próbie / suma_dodatkowego_AC_w_próbie
+
+roczne_AC = dodatkowe_kWp × założony_roczny_uzysk_AC
+roczna_oszczędność = roczne_AC × wartość_zakupu_na_AC
+roczny_depozyt     = roczne_AC × wartość_depozytu_na_AC
+roczna_korzyść     = roczna_oszczędność + roczny_depozyt
+prosty_zwrot_lata  = koszt_samej_rozbudowy / roczna_korzyść
+roczna_stopa_%     = roczna_korzyść / koszt_samej_rozbudowy × 100
+```
+
+Z tej samej próby pochodzą udziały zmniejszenia poboru, eksportu i ograniczenia eksportu. Nie używamy ceny eksportu dla energii pokrywającej zużycie. Godziny z częściową wyceną nadal wchodzą do znanych podsum okresu, ale nie do pełnej rocznej próby.
+
+- **Nie annualizujemy liczby dni lub sumy energii krótkiego okresu.** Roczna energia jest osobnym założeniem, nie ma drugiego mnożenia przez eta/95%, a przypis RCE nie jest ponownie mnożony przez 1,23.
+- Udziały i ceny dostępnej próby mogą **zawyżyć lub zaniżyć** wynik roczny. Sezonowość i brakujące godziny nie gwarantują „ostrożnej” średniej. Pokazujemy dodatnie godziny/AC próby i informację o tej niepewności; to nie przedział ufności.
+- Bez dodatniej w pełni wycenionej próby nie ma podstaw do rocznego ROI; nie zastępujemy go zerem lub ceną ręczną. Przy zadanej rocznej energii 0 wynik roczny wynosi 0. Przy zerowej korzyści nie ma skończonego zwrotu, przy pustym/zerowym koszcie okres/stopa zwrotu są nieznane.
+- Koszt dotyczy całej samej rozbudowy. Prosty zwrot pomija degradację, serwis, finansowanie, dyskonto i przyszłe zmiany cen/przepisów.
+
+## Dane, pobranie i izolacja
+
+Można użyć **krótszego lub niepełnego istniejącego zapisu**, gdy jego zakres choć częściowo pokrywa wybór oraz zgadza się rola licznika PV. Wybierany jest jeden cały zbiór z największą liczbą użytecznych godzin w wybranym okresie, następnie najnowszy. Nie sklejamy godzin kilku historii i nie rozszerzamy zakresu ponad metadane. UI pokazuje źródło, zakres i pokrycie. CSV zapisany w PV jest używany ponownie.
+
+Przycisk **„Pobierz dostępne dane PV — osobny zapis”** pobiera tylko PV DC i opcjonalną moc, miesięcznymi częściami z buforem. Zbiór z lukami można aktywować, jeżeli ma przynajmniej jedną użyteczną godzinę PV. Prawidłowa odpowiedź CSV z samym nagłówkiem dla całego pustego miesiąca nie blokuje kolejnych dostępnych miesięcy: jest pustą częścią, nie rekordami zerowymi. HTML, błędny format lub błąd HTTP nie są traktowane jako brak miesiąca. Sama moc, cały pusty zakres lub przerwany zapis nie zastępują wcześniejszego zbioru.
+
+Nowe klucze: `pv-sim-v1-available-active` i `pv-sim-v1-available-data-*`. Ten osobny atomowy zapis **nie zastępuje** pełnej historii, cache eksportowego ani CSV. Stare historyczne tryby nie korzystają z niego po cichu i nadal sprawdzają pełny wymagany zakres. Algorytm atomowego zapisu, limity części, odczyt niepewnego commita i izolacja kluczy zachowane. Jawny dwuklik resetu obejmuje także nową kolekcję, nigdy legacy.
+
+Nowy tryb nie uruchamia automatycznego pobierania HA, nawet jeśli wcześniejszy `autoRefresh` pozostał zapisany. Pobranie jest ręczne. Uszkodzony nowy cache nie blokuje starszych trybów ani nie jest automatycznie nadpisywany. Formularz nie zmienia parametrów baterii, starych sprawności, manualnej ceny rocznej lub dawnych zgód poza unieważnieniem zgody po zmianie trybu/założeń. Spóźnione obliczenie nie publikuje wyniku po zmianie formularza.
+
+Bajtowo niezmienione względem 0.3.9: silniki `pv-model.js`, `pv-export.js`, `pv-annual.js`, przygotowanie `pv-data.js`, formularz `pv-form.js`, backend recorder/HA/KV, walidatory, XLSX i zależności. W `pv-store.js` dodano tylko osobną kolekcję i objęcie jej jawnym resetem. Wspólny HTML/serwer zmieniają wyłącznie lokalny asset `pv-available.js` i jego tag cache.
+
+## Obsługa i dostawa
+
+W **Rozbudowa PV**, u góry w **„Sposób liczenia korzyści z rozbudowy”**, wybierz nowy wariant. Wybór wcześniejszego trybu nie jest sam zmieniany. Sprawdź zakres, kWp, podłączenie, limity, sprawność, koszt i roczny uzysk AC. Zaakceptuj scenariusz i oblicz. Jeśli zachowana historia już daje potrzebną próbę, nie pobieraj/nie importuj jej ponownie. Jeśli potrzebujesz szerszego dostępnego profilu, użyj nowego osobnego przycisku pobrania, nie czyść starych danych.
+
+Dostawa: Git + PowerShell, **bez Node/npm, testów PC, konsoli przeglądarki i obowiązku wklejania logów**. Paczka na dokładnej bazie 0.3.9; DryRun → zastosowanie, pytania w bieżącym PowerShellu, instalator nieinteraktywny. Bez resetu/force/kasowania starszych klonów. Opcjonalny push wymaga osobnego dokładnego `TAK`; PR/scalenie/HA osobno. Asystent nie publikuje i nie wdraża.
+
+Testy przygotowania obejmują poprzednie regresje, podział energii, oddzielne ceny/podsumy, braki/konflikty/DST, brak podwójnej wyceny, roczną próbę i brak skończonego zwrotu przy zerowej korzyści, wybór cache i atomiczny zapis, prawdziwy DOM/ingress/HTTP oraz przypadki mutacyjne. Dane testowe nowych modułów są sztuczne; prywatne historie i raporty pozostają poza publicznym ZIP. To nie wykonanie na PC/HA użytkownika ani walidacja fizyczna.
+
+---
+
+# Zachowany opis 0.3.9 — osobny manualny estymator roczny
+
+Poniżej wcześniejszy kontrakt. Jego założenie wyceny całego przyrostu jako eksportu, ręczna cena i trzy warianty cen **nie dotyczą nowego trybu zużycie → eksport**. Historyczne instrukcje instalacji nie zastępują procedury 0.4.0.
+
 # Rozbudowa PV 0.3.9 — osobny „Szacunek roczny + ROI”
 
 **Nowy tryb jest estymatorem z jawnych założeń, nie rekonstrukcją pomiarów.** Odpowiada na pytanie o orientacyjną roczną wartość dołożonych paneli i prosty zwrot samej rozbudowy, bez wymagania kompletnych godzin HA/eLicznika/RCE. Nie uzupełnia luk, nie zeruje nieznanych pomiarów i nie annualizuje krótkiego okresu.
