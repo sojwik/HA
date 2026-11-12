@@ -2,6 +2,7 @@
 // Prawdziwy Express + KV, ale HA zastąpione lokalnym stubem. Zero urządzeń/sieci HA.
 const assert = require('assert'), fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
 const { spawn } = require('child_process');
+const A = require('../app/public/pv-annual');
 const S = require('../app/public/pv-store'), D = require('../app/public/pv-data'), X = require('../app/public/pv-export'), F = require('./pv-fixture');
 const APP = path.resolve(__dirname, '../app'), TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'g13pv-http-'));
 const PORT = 8297, BASE = 'http://127.0.0.1:' + PORT;
@@ -39,7 +40,7 @@ const original = require(id); const fake = Object.assign({}, original, {
   });
   console.log('\n=== PV: prawdziwy HTTP/KV i cache zasobów ===');
   const html = await (await fetch(BASE + '/')).text();
-  for (const asset of ['pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js', 'pv-export.js']) {
+  for (const asset of ['pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js', 'pv-export.js', 'pv-annual.js']) {
     await test('HTTP asset ' + asset + ': lokalny, prawidłowy tag treści i no-cache', async () => {
       const hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(APP, 'public', asset))).digest('hex');
       assert.ok(html.includes(asset + '?v=' + String(parseInt(hash.slice(0, 12), 16))));
@@ -99,6 +100,16 @@ const original = require(id); const fake = Object.assign({}, original, {
   await test('HTTP eksportowe shardy mieszczą się w tym samym ograniczeniu 2 MB KV', async () => {
     const manifest = JSON.parse((await kv.get(S.prefix + 'export-active')).value);
     for (const key of manifest.keys) { const value = (await kv.get(key)).value; assert.ok(Buffer.byteLength(JSON.stringify({value})) < 1800000); }
+  });
+  await test('HTTP roczne założenia/pochodzenie: restart, trzy historie i ledger nietknięte', async () => {
+    const st = S.create(kv), keys = ['active','grid-active','export-active'].map(x => S.prefix+x);
+    const before = await Promise.all(keys.map(async k => (await kv.get(k)).value));
+    const cfg = { ...f.settings, calculationMode:'annual_estimate', ...A.defaults, addedKwp:3.18, costPln:4000, depositUseFraction:1,
+      annualPriceOrigin:{kind:'historical_reference',startDate:'2026-09-01',endDate:'2026-09-30',hours:720,valuePlnKwh:.3,notAnnual:true} };
+    await st.saveSettings(cfg); const saved = await S.create(kv).loadSettings(); assert.deepStrictEqual(saved,cfg);
+    const result = A.estimate(saved); assert.ok(Math.abs(result.variants[1].annualBenefitPln-954)<1e-9);
+    assert.deepStrictEqual(await Promise.all(keys.map(async k => (await kv.get(k)).value)),before);
+    assert.strictEqual((await kv.get('monthly-ledger')).value,legacy);
   });
   await test('HTTP reset usuwa tylko PV; health/ledger i starsze zasoby pozostają poprawne', async () => {
     await S.create(kv).reset(); assert.deepStrictEqual((await kv.list(S.prefix)).keys, []);

@@ -31,3 +31,8 @@
 #tab-pv .pv-mode-selector{margin:1rem 0}
 
 #tab-pv[data-calculation-mode="export_only"] .pv-period{grid-template-columns:repeat(2,minmax(0,1fr))}
+
+/* 0.3.9: history controls remain in DOM/persistence, but not inputs of annual estimate. */
+#tab-pv[data-calculation-mode="annual_estimate"] #pvAnnualReferencePanel { margin-top: 1rem; }
+#tab-pv[data-calculation-mode="annual_estimate"] #pvAnnualInfo { line-height: 1.65; }
+#tab-pv #pvAnnualReferencePanel button { margin: .4rem .5rem .4rem 0; }

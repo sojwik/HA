@@ -114,9 +114,9 @@ async function saveGrid(kv, data) {
   const f = xf(); f.settings.capacityKwh = null; f.settings.chargeDcKw = null; f.settings.dischargeDcKw = null;
   for (const r of f.series[f.settings.entities.acOutput]) r.change = 0; F.sumSeries(f.series);
   const d = await open(f), b = baseline(d);
-  await test('EXUI01 nowy moduł lokalny, etykieta 0.3.8 i wybrany prosty tryb', () => {
+  await test('EXUI01 nowy moduł lokalny, etykieta 0.3.9 i wybrany prosty tryb', () => {
     assert.ok(d.window.G13PvExport); assert.strictEqual(d.errors.length, 0, d.errors.join('\n'));
-    assert.ok(txt(d, 'tab-pv').includes('0.3.8')); assert.strictEqual(d.window.document.getElementById('pv-calculationMode').value, 'export_only'); isolated(d, b);
+    assert.ok(txt(d, 'tab-pv').includes('0.3.9')); assert.strictEqual(d.window.document.getElementById('pv-calculationMode').value, 'export_only'); isolated(d, b);
   });
   await test('EXUI02 parametry/encje baterii i domu ukryte i nieaktywne, ale zachowane', () => {
     const doc = d.window.document;
