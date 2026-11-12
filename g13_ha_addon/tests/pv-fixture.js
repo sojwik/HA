@@ -31,7 +31,9 @@ function data(s = settings()) {
       const stat = channel === 'soc' || channel === 'pvPower';
       const change = stat ? null : channel === 'pv' || channel === 'acOutput' ? pv : channel === 'house' ? (hour === 12 ? 2 : hour === 20 ? 3 : 0) : 0;
       const mean = channel === 'soc' ? 10 : channel === 'pvPower' ? pv : null;
-      series[id].push({ ts, change, sum: stat ? null : 0, mean, min: mean, max: mean });
+      const r = { ts, change, sum: stat ? null : 0, mean, min: mean, max: mean };
+      if (channel === 'pvPower') r.powerUnit = 'kW';
+      series[id].push(r);
     }
   }
   for (let ts = span.start; ts < span.end; ts += HOUR) {
@@ -44,11 +46,11 @@ function data(s = settings()) {
   return { series: sumSeries(series), shared, settings: s, span };
 }
 function csv(series, ids = Object.keys(series), start = -Infinity, end = Infinity) {
-  const head = ['statistic_id', 'start', 'start_utc', 'mean', 'min', 'max', 'sum', 'change'];
+  const head = ['statistic_id', 'start', 'start_utc', 'mean', 'min', 'max', 'sum', 'change', 'power_unit'];
   const lines = [head.join(',')];
   for (const id of ids) for (const r of series[id] || []) if (r.ts >= start && r.ts < end) {
     lines.push([id, D.localKey(r.ts).replace('_', ' ') + ':00:00', new Date(r.ts).toISOString().replace('.000Z', 'Z'),
-      ...['mean', 'min', 'max', 'sum', 'change'].map(k => r[k] === null ? '' : r[k])].join(','));
+      ...['mean', 'min', 'max', 'sum', 'change'].map(k => r[k] === null ? '' : r[k]), r.powerUnit || ''].join(','));
   }
   return lines.join('\n') + '\n';
 }
@@ -64,4 +66,16 @@ function legacyKv(f) {
     'rce-cache': JSON.stringify({ v: 2, data: f.shared.rceHourly }),
   };
 }
-module.exports = { settings, data, csv, sumSeries, legacyKv, HOUR };
+function gridCsv(grid) {
+  const lines = ['Data;Strefa;Wartość;Rodzaj;Status;'];
+  for (const key of Object.keys(grid).sort()) {
+    const r = grid[key], day = key.slice(0, 10), hour = Number(key.slice(-2));
+    const span = D.range(day, day); let count = 0;
+    for (let t = span.start; t < span.end; t += HOUR) if (D.localKey(t) === key) count++;
+    for (const [field, dir] of [['poborPoZbil', 'pobrana'], ['oddaniePoZbil', 'oddana']])
+      for (let n = 0; n < count; n++) lines.push(day + ' ' + (hour + 1) + ':00;' + (r.strefa || '') + ';'
+        + String(r[field] / count).replace('.', ',') + ';' + dir + ' po zbilansowaniu [kWh];licznik;');
+  }
+  return lines.join('\n') + '\n';
+}
+module.exports = { settings, data, csv, gridCsv, sumSeries, legacyKv, HOUR };

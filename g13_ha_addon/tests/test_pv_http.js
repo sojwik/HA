@@ -39,7 +39,7 @@ const original = require(id); const fake = Object.assign({}, original, {
   });
   console.log('\n=== PV: prawdziwy HTTP/KV i cache zasobów ===');
   const html = await (await fetch(BASE + '/')).text();
-  for (const asset of ['pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css']) {
+  for (const asset of ['pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js']) {
     await test('HTTP asset ' + asset + ': lokalny, prawidłowy tag treści i no-cache', async () => {
       const hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(APP, 'public', asset))).digest('hex');
       assert.ok(html.includes(asset + '?v=' + String(parseInt(hash.slice(0, 12), 16))));
@@ -52,7 +52,7 @@ const original = require(id); const fake = Object.assign({}, original, {
   await test('HTTP nieznany zasób nie jest SPA 200', async () => {
     const r = await fetch(BASE + '/pv-not-here.js'); assert.strictEqual(r.status, 404); assert.deepStrictEqual(await r.json(), { error: 'not_found' });
   });
-  await test('HTTP PV żąda tylko własnych encji i zachowuje jawny UTC/typy', async () => {
+  await test('HTTP dotychczasowy eksport zachowuje wybrane encje i jawny UTC/typy', async () => {
     const qs = new URLSearchParams({ entities: 'sensor.test_pv,sensor.test_ac_charge', start: '2026-08-31T21:00:00Z', end: '2026-09-01T22:00:00Z', types: 'change,sum,mean,min,max' });
     const response = await fetch(BASE + '/api/ha/stats.csv?' + qs); assert.strictEqual(response.status, 200);
     assert.ok(response.headers.get('content-type').startsWith('text/csv'));
@@ -82,6 +82,12 @@ const original = require(id); const fake = Object.assign({}, original, {
     const loaded = await S.create(kv).loadDataset(); assert.ok(loaded.parts.length > 1);
     const combined = D.mergeSeries(loaded.parts); assert.strictEqual(combined[f.settings.entities.pv].length, 721);
     assert.strictEqual((await kv.get('monthly-ledger')).value, legacy);
+  });
+  await test('HTTP osobny CSV eLicznika zapisany i odczytany przez prawdziwy KV bez zmiany ledger', async () => {
+    const st = S.create(kv), grid = D.parseGridCsvFiles([{ name: 'synthetic-grid.csv', text: F.gridCsv(f.shared.hourlyElicznik) }]);
+    await st.saveGridDataset(grid); const read = D.validateGridDataset(await S.create(kv).loadGridDataset());
+    assert.deepStrictEqual(read, grid); assert.strictEqual((await kv.get('monthly-ledger')).value, legacy);
+    assert.ok((await kv.get(S.prefix + 'active')).value); // historia HA również zachowana
   });
   await test('HTTP reset usuwa tylko PV; health/ledger i starsze zasoby pozostają poprawne', async () => {
     await S.create(kv).reset(); assert.deepStrictEqual((await kv.list(S.prefix)).keys, []);

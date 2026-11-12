@@ -11,6 +11,9 @@ const SUITES = [
   ['DOM (dymny, jsdom)', 'test_dom_smoke.js'],
   ['PV — fizyka i ekonomia scenariusza', 'test_pv_model.js'],
   ['PV — dane, DST i osobny zapis', 'test_pv_data_store.js'],
+  ['PV — osobny CSV i jednostki', 'test_pv_grid_units.js'],
+  ['PV — rzeczywisty protokół recorder i HTTP', 'test_pv_recorder_http.js'],
+  ['PV — prosty formularz, ampery i założenia strat', 'test_pv_form.js'],
   ['PV — izolacja DOM', 'test_pv_dom.js'],
   ['PV — HTTP, zasoby i KV', 'test_pv_http.js'],
 ];
