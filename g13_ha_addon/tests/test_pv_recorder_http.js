@@ -19,8 +19,25 @@ async function freePort() { const s = net.createServer(); s.listen(0, '127.0.0.1
       if (q.type === 'auth') { client.send(JSON.stringify({ type: q.access_token === 'synthetic-not-a-secret' ? 'auth_ok' : 'auth_invalid' })); return; }
       messages.push(q);
       if (q.type === 'recorder/get_statistics_metadata') {
-        const metadata = { statistic_id: powerId, unit_of_measurement: mode === 'kW' ? 'kW' : mode === 'unknown' ? '%' : 'W', unit_class: mode === 'wrong-class' ? 'energy' : 'power' };
-        const result = mode === 'missing' ? [] : mode === 'duplicate' ? [metadata, metadata] : [metadata];
+        const nativeUnit = ['kW', 'modern-kW', 'modern-kW-display-W'].includes(mode) ? 'kW' : 'W';
+        // Kształt modern wiernie odtwarza HA 2026.10:
+        // recorder/statistics.py::_flatten_list_statistic_ids_metadata_result.
+        const metadata = mode.startsWith('modern') ? {
+          statistic_id: powerId, statistics_unit_of_measurement: nativeUnit,
+          display_unit_of_measurement: mode.endsWith('display-W') ? 'W' : 'kW',
+          unit_class: 'power', has_sum: false, has_mean: true, mean_type: 1, name: null, source: 'recorder'
+        } : { statistic_id: powerId, unit_of_measurement: mode === 'unknown' ? '%' : nativeUnit, unit_class: mode === 'wrong-class' ? 'energy' : 'power' };
+        if (mode === 'modern-both-same') metadata.unit_of_measurement = 'W';
+        if (mode === 'modern-conflict') metadata.unit_of_measurement = 'kW';
+        if (mode === 'modern-null') { metadata.statistics_unit_of_measurement = null; metadata.unit_of_measurement = 'W'; }
+        if (mode === 'modern-unknown') metadata.statistics_unit_of_measurement = '%';
+        if (mode === 'modern-wrong-class') metadata.unit_class = 'energy';
+        if (mode === 'modern-no-class') delete metadata.unit_class;
+        if (mode === 'modern-null-class') metadata.unit_class = null;
+        if (mode === 'modern-display-only') delete metadata.statistics_unit_of_measurement;
+        if (mode === 'modern-wrong-id') metadata.statistic_id = 'sensor.not_requested';
+        const result = mode === 'missing' ? [] : ['duplicate', 'modern-duplicate'].includes(mode) ? [metadata, metadata]
+          : mode === 'modern-object' ? { [powerId]: metadata } : [metadata];
         client.send(JSON.stringify({ id: q.id, type: 'result', success: mode !== 'metadata-error', result })); return;
       }
       if (q.type === 'recorder/statistics_during_period') {
@@ -29,7 +46,7 @@ async function freePort() { const s = net.createServer(); s.listen(0, '127.0.0.1
           result[id] = (f.series[id] || []).filter(r => r.ts >= Date.parse(q.start_time) && r.ts < Date.parse(q.end_time)).map(r => {
             const p = { start: r.ts, sum: r.sum, change: r.change, mean: r.mean, min: r.min, max: r.max };
             if (id === powerId) {
-              const nativeFactor = mode === 'kW' ? 1 : 1000;
+              const nativeFactor = ['kW', 'modern-kW', 'modern-kW-display-W'].includes(mode) ? 1 : 1000;
               const outputFactor = q.units && q.units.power === 'kW' && mode !== 'unknown' ? 1 / nativeFactor : 1;
               for (const k of ['mean', 'min', 'max']) p[k] *= nativeFactor * outputFactor;
             }
@@ -71,6 +88,14 @@ async function freePort() { const s = net.createServer(); s.listen(0, '127.0.0.1
     mode = 'kW'; const r = await pv(); assert.strictEqual(r.status, 200);
     assert.deepStrictEqual(D.parseStatsCsv(await r.text()), parsedW);
   });
+  for (const kind of ['modern-W', 'modern-kW', 'modern-kW-display-W', 'modern-both-same', 'modern-no-class', 'modern-null-class']) {
+    await test('PR 0.3.7 rzeczywiste pole statistics_unit_of_measurement (' + kind + ') → kW bez podwójnego przeliczenia', async () => {
+      mode = kind; const r = await pv(); assert.strictEqual(r.status, 200);
+      const parsed = D.parseStatsCsv(await r.text()); assert.deepStrictEqual(parsed, parsedW);
+      const p = D.prepare(parsed, f.settings, f.shared); assert.strictEqual(p.diagnostics.powerUnknownUnitHours, 0);
+      assert.strictEqual(p.diagnostics.pvPowerKnownHours, 24); assert.strictEqual(p.diagnostics.pvPowerApproxKwh, 4);
+    });
+  }
   await test('PR03 stary endpoint i ha-ws zachowują energy-only oraz oryginalne W', async () => {
     mode = 'W'; const n = messages.length;
     const r = await fetch(base + '/api/ha/stats.csv?' + qs); assert.strictEqual(r.status, 200); const raw = await r.text();
@@ -78,7 +103,7 @@ async function freePort() { const s = net.createServer(); s.listen(0, '127.0.0.1
     const p = D.parseStatsCsv(raw); assert.strictEqual(p[powerId][13].mean, 4000); assert.strictEqual(p[powerId][13].powerUnit, undefined);
     assert.strictEqual(messages.length - n, 1); assert.deepStrictEqual(messages.at(-1).units, { energy: 'kWh' });
   });
-  for (const kind of ['unknown', 'missing', 'wrong-class', 'duplicate', 'metadata-error']) {
+  for (const kind of ['unknown', 'missing', 'wrong-class', 'duplicate', 'metadata-error', 'modern-conflict', 'modern-null', 'modern-unknown', 'modern-wrong-class', 'modern-display-only', 'modern-wrong-id', 'modern-duplicate', 'modern-object']) {
     await test('PR brak potwierdzonej jednostki (' + kind + ') nie jest domyślnym kW', async () => {
       mode = kind; const r = await pv(); assert.strictEqual(r.status, 200); const series = D.parseStatsCsv(await r.text());
       assert.strictEqual(series[powerId][13].powerUnit, undefined);

@@ -17,6 +17,19 @@ function validate(ids, start, end, powerId) {
     throw new Error('PV: wymagany poprawny zakres UTC, najwyżej 62 dni na część.');
   if (powerId && !ids.includes(powerId)) throw new Error('PV: encja mocy musi należeć do żądanych encji.');
 }
+function confirmedPowerUnit(metadata, powerId) {
+  if (!Array.isArray(metadata)) return null;
+  const matches = metadata.filter(m => m && m.statistic_id === powerId);
+  if (matches.length !== 1) return null;
+  const m = matches[0], own = k => Object.prototype.hasOwnProperty.call(m, k);
+  // HA recorder 2026.10: _flatten_list_statistic_ids_metadata_result.
+  // Stare HA używa unit_of_measurement; display_unit nie dowodzi jednostki statystyki.
+  const units = ['statistics_unit_of_measurement', 'unit_of_measurement'].filter(own).map(k => m[k]);
+  if (!units.length || units.some(u => !['W', 'kW'].includes(u)) || new Set(units).size !== 1
+    || (m.unit_class != null && m.unit_class !== 'power')) return null;
+  // statistics_during_period poniżej żąda kW. Nie dzielimy odpowiedzi drugi raz.
+  return 'kW';
+}
 function fetchPvStatistics(ids, start, end, powerId = '') {
   try { validate(ids, start, end, powerId); } catch (e) { return Promise.reject(e); }
   const token = process.env.SUPERVISOR_TOKEN;
@@ -53,11 +66,7 @@ function fetchPvStatistics(ids, start, end, powerId = '') {
         if (msg.type !== 'result') return;
         if (msg.id === 1 && stage === 'metadata') {
           // Brak metadanych nie zabiera liczników kWh; moc pozostaje nieznana.
-          if (msg.success && Array.isArray(msg.result)) {
-            const matches = msg.result.filter(m => m && m.statistic_id === powerId);
-            if (matches.length === 1 && ['W', 'kW'].includes(matches[0].unit_of_measurement)
-              && (matches[0].unit_class == null || matches[0].unit_class === 'power')) powerUnit = 'kW';
-          }
+          if (msg.success) powerUnit = confirmedPowerUnit(msg.result, powerId);
           stats(); return;
         }
         if (msg.id === 2 && stage === 'stats') {
@@ -100,4 +109,4 @@ async function handler(req, res) {
     res.send(toCsv(result));
   } catch (e) { res.status(502).json({ error: e.message }); }
 }
-module.exports = { fetchPvStatistics, toCsv, handler };
+module.exports = { fetchPvStatistics, toCsv, handler, confirmedPowerUnit };

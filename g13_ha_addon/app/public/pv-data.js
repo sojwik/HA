@@ -218,13 +218,36 @@
     }
     return validateGridDataset({ format: GRID_FORMAT, sources, rows: Array.from(map.values()) });
   }
+  // Wybór źródła dotyczy CAŁEGO rekordu godziny, nigdy osobnych kierunków.
+  // Nie dopisujemy flag do legacy; oryginalny CSV pozostaje osobnym dowodem.
+  const GRID_POLICY_VERSION = 1;
+  function restoreGridSelection(saved) {
+    if (!saved) return { gridSource: 'auto', gridPolicyVersion: GRID_POLICY_VERSION, migrated: false };
+    const source = saved.gridSource === undefined ? 'shared' : saved.gridSource;
+    if (!['auto', 'shared', 'csv'].includes(source)) throw new Error('Nieprawidłowe źródło eLicznika PV.');
+    if (saved.gridPolicyVersion === undefined) return { gridSource: 'auto', gridPolicyVersion: GRID_POLICY_VERSION,
+      migrated: true, previousSource: source };
+    if (saved.gridPolicyVersion !== GRID_POLICY_VERSION) throw new Error('Nieznana wersja wyboru źródeł PV. Nie zastąpiono jej domyślną.');
+    return { gridSource: source, gridPolicyVersion: GRID_POLICY_VERSION, migrated: false };
+  }
+  function gridCounts(startDate, endDate) {
+    const span = range(startDate, endDate), counts = new Map();
+    for (let t = span.start; t < span.end; t += HOUR) {
+      const key = localKey(t); counts.set(key, (counts.get(key) || 0) + 1);
+    }
+    return { span, counts };
+  }
+  function gridRowComplete(r, count) {
+    return !!r && r.hasImport === true && r.hasExport === true
+      && finite(r.poborPoZbil) && r.poborPoZbil >= 0 && finite(r.oddaniePoZbil) && r.oddaniePoZbil >= 0
+      && (count === 1 || (r.expectedCount === count && r.importCount === count && r.exportCount === count));
+  }
   function inspectGrid(grid, startDate, endDate) {
-    const span = range(startDate, endDate), keys = new Set();
-    for (let t = span.start; t < span.end; t += HOUR) keys.add(localKey(t));
-    const out = { expectedHours: span.hours, expectedBlocks: keys.size, presentBlocks: 0, validBlocks: 0,
+    const { span, counts } = gridCounts(startDate, endDate);
+    const out = { expectedHours: span.hours, expectedBlocks: counts.size, presentBlocks: 0, validBlocks: 0,
       missingRows: 0, missingImportFlags: 0, missingExportFlags: 0, rejectedImportFlags: 0, rejectedExportFlags: 0,
-      invalidImportValues: 0, invalidExportValues: 0 };
-    for (const key of keys) {
+      invalidImportValues: 0, invalidExportValues: 0, unconfirmedDstBlocks: 0 };
+    for (const [key, count] of counts) {
       const r = own(grid, key) ? grid[key] : null;
       if (!r || typeof r !== 'object') { out.missingRows++; continue; }
       out.presentBlocks++;
@@ -232,32 +255,50 @@
       if (r.hasExport === undefined) out.missingExportFlags++;
       if (r.hasImport !== true) out.rejectedImportFlags++;
       if (r.hasExport !== true) out.rejectedExportFlags++;
-      const imp = finite(r.poborPoZbil) && r.poborPoZbil >= 0, exp = finite(r.oddaniePoZbil) && r.oddaniePoZbil >= 0;
-      if (!imp) out.invalidImportValues++;
-      if (!exp) out.invalidExportValues++;
-      if (r.hasImport === true && r.hasExport === true && imp && exp) out.validBlocks++;
+      if (!finite(r.poborPoZbil) || r.poborPoZbil < 0) out.invalidImportValues++;
+      if (!finite(r.oddaniePoZbil) || r.oddaniePoZbil < 0) out.invalidExportValues++;
+      if (count > 1 && !(r.expectedCount === count && r.importCount === count && r.exportCount === count)) out.unconfirmedDstBlocks++;
+      if (gridRowComplete(r, count)) out.validBlocks++;
     }
     return out;
   }
   function gridView(shared, settings, imported) {
-    const legacy = shared && shared.hourlyElicznik || {}, source = settings.gridSource || 'shared';
-    if (!['shared', 'csv'].includes(source)) throw new Error('Nieprawidłowe źródło eLicznika PV.');
-    let grid = legacy;
-    if (source === 'csv') {
-      if (!imported) throw new Error('Wybrano osobny CSV eLicznika, ale nie zapisano go jeszcze w karcie PV.');
-      grid = Object.fromEntries(validateGridDataset(imported).rows.map(r => [r.key, r]));
+    const legacy = shared && shared.hourlyElicznik || {}, source = settings.gridSource || 'auto';
+    if (!['auto', 'shared', 'csv'].includes(source)) throw new Error('Nieprawidłowe źródło eLicznika PV.');
+    if (source === 'csv' && !imported) throw new Error('Wybrano osobny CSV eLicznika, ale nie zapisano go jeszcze w karcie PV.');
+    // Nawet przy kompletnym legacy nie ukrywamy uszkodzonego zapisu PV.
+    const csv = imported ? Object.fromEntries(validateGridDataset(imported).rows.map(r => [r.key, r])) : {};
+    const { counts } = gridCounts(settings.startDate, settings.endDate);
+    const grid = source === 'shared' ? legacy : source === 'csv' ? csv : Object.create(null);
+    const origins = Object.create(null), conflicts = new Set(), conflictDetails = [];
+    const selection = { sharedBlocks: 0, csvBlocks: 0, unresolvedBlocks: 0 };
+    for (const [key, count] of counts) {
+      const a = own(legacy, key) ? legacy[key] : null, b = own(csv, key) ? csv[key] : null;
+      if (source !== 'shared' && a && b) {
+        const fields = ['poborPoZbil', 'oddaniePoZbil'].filter(k => finite(a[k]) && finite(b[k]) && Math.abs(a[k] - b[k]) > EPS);
+        if (a.strefa && b.strefa && a.strefa !== b.strefa) fields.push('strefa');
+        if (fields.length) {
+          conflicts.add(key);
+          conflictDetails.push({ key, fields, shared: { poborPoZbil: a.poborPoZbil, oddaniePoZbil: a.oddaniePoZbil, strefa: a.strefa },
+            csv: { poborPoZbil: b.poborPoZbil, oddaniePoZbil: b.oddaniePoZbil, strefa: b.strefa } });
+        }
+      }
+      let origin = source;
+      if (source === 'auto') {
+        const aOk = gridRowComplete(a, count), bOk = gridRowComplete(b, count);
+        // Znana strefa może wybrać cały CSV, ale nie jest doklejana do legacy.
+        if (aOk && (a.strefa || !bOk || !b.strefa)) { grid[key] = a; origin = 'shared'; }
+        else if (bOk) { grid[key] = b; origin = 'csv'; }
+        else { if (a || b) grid[key] = a || b; origin = 'unresolved'; }
+      }
+      if (!gridRowComplete(grid[key], count)) origin = 'unresolved';
+      origins[key] = origin;
+      selection[origin === 'shared' ? 'sharedBlocks' : origin === 'csv' ? 'csvBlocks' : 'unresolvedBlocks']++;
     }
-    const conflicts = new Set();
-    if (source === 'csv') for (const key of Object.keys(grid)) {
-      const a = grid[key], b = legacy[key];
-      if (!b) continue;
-      if (['poborPoZbil', 'oddaniePoZbil'].some(k => finite(a[k]) && finite(b[k]) && Math.abs(a[k] - b[k]) > EPS)
-        || (a.strefa && b.strefa && a.strefa !== b.strefa)) conflicts.add(key);
-    }
-    const activeConflicts = Array.from(conflicts).filter(k => k.slice(0, 10) >= settings.startDate && k.slice(0, 10) <= settings.endDate);
-    return { grid, conflicts, diagnostics: { source,
-      shared: inspectGrid(legacy, settings.startDate, settings.endDate), selected: inspectGrid(grid, settings.startDate, settings.endDate),
-      conflictingBlocks: activeConflicts.length } };
+    return { grid, origins, conflicts, diagnostics: { source, selection, conflictDetails,
+      shared: inspectGrid(legacy, settings.startDate, settings.endDate),
+      csv: imported ? inspectGrid(csv, settings.startDate, settings.endDate) : null,
+      selected: inspectGrid(grid, settings.startDate, settings.endDate), conflictingBlocks: conflicts.size } };
   }
 
   function prepare(seriesInput, settings, shared, importedGrid) {
@@ -337,15 +378,14 @@
       groups.get(key).push(h);
     }
     if (powerUnknownUnitHours) issue('power_unit_unknown', span.start, 'pvPower', 'warning',
-      'Nieznana jednostka mocy w historii/cache. Nie porównano jej z kWh i nie odgadnięto jednostki z wielkości liczby. Pobierz ponownie własne dane HA karty PV; liczniki energii nie zostały zmienione.', powerUnknownUnitHours);
-    const rows = [], historical = Object.create(null);
+      'Nieznana jednostka mocy w historii/cache. Nie porównano jej z kWh i nie odgadnięto jednostki z wielkości liczby. Po aktualizacji pobierz własne dane HA raz; jeśli ostrzeżenie pozostanie, metadane HA wymagają wyjaśnienia, nie kolejnych powtórzeń. Liczniki energii nie zostały zmienione.', powerUnknownUnitHours);
+    const rows = [], negativeHouseDetails = [], historical = Object.create(null);
     let dstBlocks = 0, zeroImportPositiveAcBlocks = 0, negativeHouseBlocks = 0;
     for (const [key, hs] of groups) {
       const ts = hs[0].ts, durationHours = hs.length, g = own(grid, key) ? grid[key] : null;
-      const gridOk = !!g && g.hasImport === true && g.hasExport === true
-        && finite(g.poborPoZbil) && g.poborPoZbil >= 0 && finite(g.oddaniePoZbil) && g.oddaniePoZbil >= 0;
+      const gridOk = gridRowComplete(g, durationHours);
       if (!gridOk) issue('grid_missing', ts, 'elicznik', settings.loadMode === 'conditional' ? 'error' : 'warning',
-        'Brak pełnych nieujemnych kierunków eLicznika z flagami hasImport/hasExport. Stary/niepełny zapis nie oznacza 0.');
+        'Brak pełnych nieujemnych kierunków eLicznika z flagami hasImport/hasExport (dla kroku 2 h także dwóch rekordów każdego kierunku). Stary/niepełny zapis nie oznacza 0.');
       if (gridInfo.conflicts.has(key)) issue('grid_source_conflict', ts, 'elicznik', 'error',
         'Osobny CSV różni się energią/strefą od odczytanej kopii dotychczasowych danych. Nie nadpisano różnicy; wymaga wyjaśnienia przed symulacją.');
       if (durationHours !== 1) {
@@ -359,6 +399,13 @@
       if (finite(load) && load < 0) {
         negativeHouseBlocks++;
         issue('negative_house', ts, 'house', 'error', 'Ujemne warunkowe zapotrzebowanie domu. Wartość zachowana; model zablokowany, bez clamp/wykluczania.', load);
+        const beforeAcChargeKwh = gridOk && finite(output) ? output + g.poborPoZbil - g.oddaniePoZbil : null;
+        negativeHouseDetails.push({ key, ts, endTs: ts + durationHours * HOUR, durationHours,
+          acOutputKwh: output, gridImportKwh: gridOk ? g.poborPoZbil : null,
+          gridExportKwh: gridOk ? g.oddaniePoZbil : null, acChargeKwh: ac,
+          beforeAcChargeKwh, houseKwh: load, gridSource: gridInfo.origins[key],
+          reason: settings.loadMode !== 'conditional' ? 'meter_negative'
+            : finite(beforeAcChargeKwh) && beforeAcChargeKwh < 0 ? 'export_exceeds_supply' : 'charge_exceeds_remainder' });
       }
       if (gridOk && g.poborPoZbil === 0 && finite(ac) && ac > EPS) {
         zeroImportPositiveAcBlocks++;
@@ -383,7 +430,7 @@
       }
     }
     const errors = issues.filter(x => x.severity === 'error');
-    return { ok: errors.length === 0, physicalValidation: false, rows, hourly, historical, issues,
+    return { ok: errors.length === 0, physicalValidation: false, rows, hourly, historical, issues, negativeHouseDetails,
       diagnostics: { expectedHours: span.hours, intervalCount: rows.length, dstBlocks, grid: gridInfo.diagnostics, powerUnknownUnitHours,
         residualKnownHours, residualMissingHours: span.hours - residualKnownHours,
         residualSumKwh: residualKnownHours === span.hours ? residualSum : null, residualKnownSumKwh: residualSum,
@@ -393,5 +440,5 @@
         missingRcePriceBlocks: rows.filter(r => r.rcePlnMwh === null).length, errorCount: errors.length } };
   }
   return Object.freeze({ parseStatsCsv, mergeSeries, prepare, entityIds, signature, range, midnight, nextDay, localKey,
-    parseGridCsvFiles, validateGridDataset, inspectGrid, gridView });
+    parseGridCsvFiles, validateGridDataset, inspectGrid, gridView, restoreGridSelection });
 });
