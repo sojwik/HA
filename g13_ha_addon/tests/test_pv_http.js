@@ -2,7 +2,7 @@
 // Prawdziwy Express + KV, ale HA zastąpione lokalnym stubem. Zero urządzeń/sieci HA.
 const assert = require('assert'), fs = require('fs'), path = require('path'), os = require('os'), crypto = require('crypto');
 const { spawn } = require('child_process');
-const A = require('../app/public/pv-annual');
+const A = require('../app/public/pv-annual'), R = require('../app/public/pv-available');
 const S = require('../app/public/pv-store'), D = require('../app/public/pv-data'), X = require('../app/public/pv-export'), F = require('./pv-fixture');
 const APP = path.resolve(__dirname, '../app'), TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'g13pv-http-'));
 const PORT = 8297, BASE = 'http://127.0.0.1:' + PORT;
@@ -40,7 +40,7 @@ const original = require(id); const fake = Object.assign({}, original, {
   });
   console.log('\n=== PV: prawdziwy HTTP/KV i cache zasobów ===');
   const html = await (await fetch(BASE + '/')).text();
-  for (const asset of ['pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js', 'pv-export.js', 'pv-annual.js']) {
+  for (const asset of ['pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js', 'pv-export.js', 'pv-annual.js', 'pv-available.js']) {
     await test('HTTP asset ' + asset + ': lokalny, prawidłowy tag treści i no-cache', async () => {
       const hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(APP, 'public', asset))).digest('hex');
       assert.ok(html.includes(asset + '?v=' + String(parseInt(hash.slice(0, 12), 16))));
@@ -110,6 +110,16 @@ const original = require(id); const fake = Object.assign({}, original, {
     const result = A.estimate(saved); assert.ok(Math.abs(result.variants[1].annualBenefitPln-954)<1e-9);
     assert.deepStrictEqual(await Promise.all(keys.map(async k => (await kv.get(k)).value)),before);
     assert.strictEqual((await kv.get('monthly-ledger')).value,legacy);
+  });
+  await test('HTTP częściowe PV ma osobny manifest, stare historie/CSV/ledger zachowane', async () => {
+    const st=S.create(kv), keys=['active','export-active','grid-active'].map(x=>S.prefix+x);
+    const old=await Promise.all(keys.map(async k=>(await kv.get(k)).value));
+    const settings={...f.settings,calculationMode:R.mode}, sparse=Object.fromEntries(R.entityIds(settings).map(id=>[id,f.series[id].filter((r,i)=>i!==12)]));
+    await st.saveAvailableDataset(sparse,R.signature(settings)); const loaded=await S.create(kv).loadAvailableDataset();
+    assert.deepStrictEqual(D.mergeSeries(loaded.parts),D.mergeSeries([sparse]));
+    assert.deepStrictEqual(await Promise.all(keys.map(async k=>(await kv.get(k)).value)),old);
+    assert.strictEqual((await kv.get('monthly-ledger')).value,legacy);
+    assert.ok((await kv.get(S.prefix+'available-active')).value);
   });
   await test('HTTP reset usuwa tylko PV; health/ledger i starsze zasoby pozostają poprawne', async () => {
     await S.create(kv).reset(); assert.deepStrictEqual((await kv.list(S.prefix)).keys, []);

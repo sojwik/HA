@@ -4,8 +4,8 @@
   'use strict';
   const root = document.getElementById('tab-pv');
   if (!root) return;
-  const M = window.G13PvModel, D = window.G13PvData, S = window.G13PvStore, U = window.G13PvForm, X = window.G13PvExport, A = window.G13PvAnnual;
-  if (!M || !D || !S || !U || !X || !A || !window.G13PvReadOnly) {
+  const M = window.G13PvModel, D = window.G13PvData, S = window.G13PvStore, U = window.G13PvForm, X = window.G13PvExport, A = window.G13PvAnnual, R = window.G13PvAvailable;
+  if (!M || !D || !S || !U || !X || !A || !R || !window.G13PvReadOnly) {
     root.textContent = 'Nie załadowano modułów PV. Dotychczasowe karty działają niezależnie; odśwież stronę.';
     return;
   }
@@ -18,7 +18,7 @@
     batteryToAcEta: null, acToBatteryEta: null, storeChargeEta: null, storeDischargeEta: null,
     inverterAcKw: null, addedInverterAcKw: null, exportAcKw: null,
     unlimitedInverter: false, unlimitedAddedInverter: false, unlimitedExport: false,
-    depositUseFraction: 1, loadScale: 1, costPln: null, ...A.defaults, annualPriceOrigin: null,
+    depositUseFraction: 1, loadScale: 1, costPln: null, ...A.defaults, ...R.defaults, annualPriceOrigin: null,
     allowDstAggregation: false, acceptScenario: false, autoRefresh: false,
     entities: {
       pv: 'sensor.growatt_solar_pv_energy_total', acOutput: 'sensor.growatt_solar_energy_total',
@@ -27,6 +27,7 @@
     },
   });
   const fields = [
+    ['availableAnnualAcKwhPerKwp', 'Roczny uzysk AC do podziału · kWh/kWp/rok', '1000 to edytowalny przykład, nie pomiar. Energia AC po konwersji/limicie falownika, PRZED podziałem na zmniejszenie poboru, eksport i niewykorzystaną nadwyżkę. Bez drugiego 95% i bez annualizacji dni. Puste pole wyłącza tylko roczny ROI.'],
     ['annualYieldAcKwhPerKwp', 'Roczny uzysk AC · kWh/kWp/rok', 'Startowe 1000 to jawne przykładowe założenie, nie pomiar. Uzysk nowych paneli PO stratach konwersji, zacienieniu i ograniczeniach. Nie stosujemy drugi raz 95%; dopasuj do planowanej instalacji.'],
     ['annualDepositPlnKwh', 'Środkowy przypis depozytu · zł/kWh', 'Startowe 0,30 to przykład, nie prognoza cen. Gotowa średnia kwota przypisu za kWh eksportu, już po zasadach rozliczenia — nie RCE w zł/MWh i bez kolejnego mnożnika 1,23.'],
     ['annualPriceSpreadFraction', 'Warianty ceny · ±%', 'Startowe ±30% to umowna analiza wrażliwości ceny, nie przedział ufności. Tylko cena się zmienia; uzysk i wykorzystanie pozostają takie same. 0 daje trzy identyczne warianty.'],
@@ -63,6 +64,7 @@
   ];
   let settings = defaults(), dataset = null, exportDataset = null, result = null, prepared = null, gridDataset = null, pendingGrid = null;
   let store, busy = false, blocked = false, ready = false, resetArmed = false, autoTimer = null, gridMigrationNotice = '', modeMigrationNotice = '';
+  let availableDataset = null, availableCacheError = '';
   let settingsReadable = false, annualReference = null, annualReferenceEpoch = 0, annualReferenceBusy = false, pendingAnnualPriceOrigin = null;
   const $ = id => document.getElementById(id);
   const number = (x, digits = 2) => typeof x === 'number' && Number.isFinite(x)
@@ -82,10 +84,10 @@
     wrap.append(lab, input); if (help) wrap.append(el('small', help)); return wrap;
   }
   root.innerHTML = `
-    <header class="pv-heading"><div><span class="eyebrow">Osobny kalkulator · 0.3.9</span><h2>Rozbudowa PV</h2></div><span class="pv-badge">Symulacja scenariusza</span></header>
+    <header class="pv-heading"><div><span class="eyebrow">Osobny kalkulator · 0.4.0</span><h2>Rozbudowa PV</h2></div><span class="pv-badge">Symulacja scenariusza</span></header>
     <div id="pvModeNotice" class="pv-notice"><strong>Nie jest to zwalidowana rekonstrukcja pomiarów.</strong> Porównujemy dwa modele: obecne PV i PV po rozbudowie — z dynamiczną obecną baterią, bez planowego ładowania z sieci. Dane historyczne i ich rozbieżności pokazujemy osobno. Nic nie trafia do salda depozytu, autokonsumpcji ani kalkulatora drugiego magazynu.</div>
     <form id="pvForm" novalidate>
-      <div class="pv-field pv-mode-selector"><label for="pv-calculationMode">Sposób liczenia korzyści z rozbudowy</label><select id="pv-calculationMode"><option value="annual_estimate">Szacunek roczny + ROI — bez kompletnej historii HA</option><option value="export_only">Prosty: dodatkowa produkcja PV wyceniona jako eksport</option><option value="dynamic_battery">Zaawansowany: dwa modele z dynamiczną obecną baterią</option></select><p id="pvModeHint" class="pv-muted"></p><p id="pvModeMigration" class="pv-muted"></p></div>
+      <div class="pv-field pv-mode-selector"><label for="pv-calculationMode">Sposób liczenia korzyści z rozbudowy</label><select id="pv-calculationMode"><option value="available_home_export">Dostępne godziny + roczny ROI — zużycie → eksport, bez symulacji baterii</option><option value="annual_estimate">Szacunek roczny + ROI — bez kompletnej historii HA</option><option value="export_only">Prosty: dodatkowa produkcja PV wyceniona jako eksport</option><option value="dynamic_battery">Zaawansowany: dwa modele z dynamiczną obecną baterią</option></select><p id="pvModeHint" class="pv-muted"></p><p id="pvModeMigration" class="pv-muted"></p></div>
       <section id="pvDataSection" class="panel pv-section"><div class="panel-header-row"><h3>1 · Dane i okres</h3><span class="pv-muted">Daty włącznie · Europe/Warsaw</span></div>
         <div class="pv-grid pv-period"><div class="pv-field"><label for="pv-startDate">Od</label><input id="pv-startDate" type="date"></div><div class="pv-field"><label for="pv-endDate">Do</label><input id="pv-endDate" type="date"></div><div id="pvLoadModeField" class="pv-field pv-wide"><label for="pv-loadMode">Zapotrzebowanie domu</label><select id="pv-loadMode"><option value="conditional">Warunkowe H = wyjście AC + import − eksport − ładowanie AC</option><option value="meter">Osobny, zadeklarowany licznik domu AC (bez ładowania baterii)</option></select></div></div>
         <p id="pvLoadHelp" class="pv-muted">H nie jest niezależnym pomiarem domu. Licznik ładowania AC nie oznacza fakturowanego zakupu baterii. Nie odejmujemy go od BMS DC ani nie obcinamy do importu. Przy drugim wariancie odpowiedzialność za granicę pomiaru pozostaje jawna — nazwa encji jej nie potwierdza.</p>
@@ -107,7 +109,7 @@
       <section class="panel pv-section"><h3 id="pvScenarioHeading">2 · Prosty formularz scenariusza</h3><p id="pvScenarioIntro" class="pv-muted">Podaj dodatkowe PV, prądy baterii oraz ograniczenia instalacji. Nie musisz samodzielnie wpisywać sześciu sprawności. Ustawienia nie sterują urządzeniami.</p>
         <div class="pv-field"><label for="pv-topology">Scenariusz podłączenia nowych paneli</label><select id="pv-topology"><option value="">Wybierz scenariusz — podłączenie nie jest jeszcze ustalone</option><option value="dc_shared">DC: nowe i obecne panele na wspólnym falowniku hybrydowym</option><option value="ac_added">AC: nowy falownik PV, istniejąca hybryda może przyjąć nadwyżkę AC</option></select><small id="pvTopologyHelp">Wariant AC zakłada dostępność takiego sterowania ładowaniem; nie potwierdza możliwości WIT. Połączenia elektryczne/MPPT wymagają osobnego projektu.</small></div>
         <div id="pvParameters" class="pv-grid"></div>
-        <p id="pvCurrentInfo" class="pv-notice"></p><p id="pvAnnualInfo" class="pv-notice" hidden></p>
+        <p id="pvCurrentInfo" class="pv-notice"></p><p id="pvAnnualInfo" class="pv-notice" hidden></p><p id="pvAvailableInfo" class="pv-notice" hidden></p>
         <p id="pvExportEtaInfo" class="pv-notice" hidden></p><div id="pvEfficiencyControl" class="pv-field"><label for="pv-efficiencyMode">Sprawności i straty</label><select id="pv-efficiencyMode"><option value="estimate-v1">Orientacyjne straty — gotowe założenia, nie pomiar</option><option value="custom">Własne wartości — ustawienia zaawansowane</option></select></div>
         <p id="pvEfficiencyInfo" class="pv-muted"></p>
         <details id="pvAdvanced"><summary id="pvAdvancedSummary">Zaawansowane: bateria, napięcie, własne sprawności i pozostałe założenia</summary><div id="pvAdvancedParameters" class="pv-grid"></div><h4 id="pvEfficiencyHeading">Sprawności torów — wszystkie użyte wartości są jawne</h4><p id="pvEfficiencyHelp" class="pv-muted">W wariancie orientacyjnym pola są tylko do odczytu. Nie wyznaczamy sprawności z ilorazu historycznych liczników. Aby wpisać własne wartości, wybierz „Własne wartości” powyżej.</p><div id="pvEfficiencyParameters" class="pv-grid"></div></details>
@@ -116,6 +118,7 @@
         <details id="pvDynamicAssumptions"><summary>Co model upraszcza?</summary><ul class="pv-muted"><li>Nowe PV = historyczne PV DC × dodatkowe kWp / 9,54 × względny uzysk. To profil po historycznych ograniczeniach — nie odzyskujemy utraconej produkcji ani nie znamy przyszłego zacienienia.</li><li>Stałe/średnie moce w kroku 1 h (wyjątkowo 2 h): brak gwarancji ograniczeń chwilowych, przepięć, limitów prądu/napięcia MPPT lub zgodności instalacyjnej.</li><li>Wariant AC: nowy falownik najpierw zasila dom, istniejące PV DC ma pierwszeństwo ładowania. Konwersje w obu kierunkach dzielą budżet mocy istniejącej hybrydy.</li><li>Liniowe SOC → energia; jawne sprawności torów i baterii. Brak modelu starzenia, temperatury, poboru własnego i podtrzymania SOC. Żadnych dopasowanych „strat”, aby zamknąć historię.</li><li>W obu modelach identyczny start, progi i strategia. Wynik nie zawiera korzyści z obniżenia rzeczywistego progu 30% lub zmiany ręcznego sterowania.</li><li>Zakup: aktualnie zapisane stawki G13 odczytane bez modyfikacji. Depozyt: RCE godzinowe, ujemne ceny → 0, mnożnik 1,23 od lutego 2025. Nieznanych cen nie zastępujemy zerem ani stawką płaską.</li><li>Brak rocznego przeliczenia i okresu zwrotu. Końcowy zapas energii nie jest wyceniany. Zmiana depozytu nie jest wypłatą gotówkową.</li></ul></details>
       </section>
       <details id="pvExportAssumptions" class="panel pv-section" hidden><summary>Założenia prostego trybu eksportu — przeczytaj</summary><ul class="pv-muted"><li>Nowe PV = historyczne PV DC × dodatkowe kWp / obecne kWp × względny uzysk. Nie skalujemy eksportu eLicznika. Profil zawiera już skutki historycznego ograniczania/awarii; nie odzyskujemy brakującej produkcji.</li><li>Cały dostępny przyrost traktujemy jako eksport. Rzeczywista autokonsumpcja i ładowanie baterii mogłyby go zmniejszyć. Nie rekonstruujemy instalacji bez magazynu.</li><li>Wspólny DC: różnica krzywych konwersji samego PV przed/po rozbudowie. Nie znamy zajęcia hybrydy przez baterię, prądów/napięć MPPT ani przyszłych ograniczeń.</li><li>Eksport eLicznika jest punktem odniesienia dla wolnego miejsca w limicie całego układu. Historia ponad zadanym limitem daje ostrzeżenie i brak miejsca na przyrost — bez obcięcia historii. Przy świadomie nieograniczonym eksporcie nie wymagamy tego punktu odniesienia.</li><li>Moce średnie w 1 h lub jawnym kroku 2 h nie gwarantują dotrzymania limitów chwilowych. Nowe panele mogą mieć inny profil, orientację, zacienienie i temperaturę.</li><li>Wyceniamy tylko dodatkowy eksport według zapisanych RCE. Brak ceny przy dodatniej energii oznacza nieznaną pełną kwotę. Depozyt nie jest gotówką; nie wyliczamy rocznego zwrotu ani oszczędności G13.</li><li>H, ładowanie AC, BMS i SOC nie są potrzebne temu trybowi. Błędy tych danych nie zostały naprawione i nadal obowiązują w modelu z baterią. Kompletność/czas PV DC nadal podlegają kontroli.</li></ul></details>
+      <details id="pvAvailableRules" class="panel pv-section" hidden><summary>Założenia: dostępne godziny, zużycie i eksport — przeczytaj</summary><ul class="pv-muted"><li>Dodatkowe PV z profilu DC i przyjętych limitów/sprawności. Najpierw zmniejsza historyczny pobór, reszta trafia na eksport do wolnego limitu. Pobór jest przybliżeniem niezaspokojonego zużycia, może obejmować ładowanie baterii. Nie odtwarzamy H ani zmienionej pracy magazynu; nie odłączamy fizycznej baterii.</li><li>Każda znana część ma własną wycenę: zakup według aktualnie zapisanych stawek G13 (nie datowanego archiwum taryfy), eksport według RCE tej godziny. Braki nie blokują innych godzin/składników. Nie zastępujemy cen 0,30 zł, pomiarów zerami ani nie zgadujemy podziału powtórzonej godziny DST.</li><li>Pełny przypis depozytu jest założeniowo wykorzystany na późniejsze rozliczenie energii domu. To nie gotówka, wypłata 30% ani stałe 100% autokonsumpcji energii. Danej kWh nie wyceniamy jednocześnie jako uniknięty zakup i eksport.</li><li>Roczny wynik = jawny uzysk AC × nowe kWp × korzyść na kWh AC w w pełni wycenionej próbie. Podział na zmniejszenie zakupu, eksport i ograniczenie eksportu bierze się z tej samej próby. Nie mnożymy krótkiego okresu do roku. Niepełna cena nie zaniża automatycznie rocznej średniej; może ją zmienić w obie strony.</li><li>Uzysk roczny już po konwersji/falowniku, przed podziałem. Nie mnożymy go drugi raz przez eta; brak uzysku nie blokuje podsum okresu. Prosty ROI pomija degradację, serwis, dyskonto, finansowanie i przyszłe zmiany cen/przepisów. Zero korzyści nie daje skończonego zwrotu.</li><li>Zapis częściowych danych jest osobny. Stare pełne modele, cache, CSV, ustawienia i realne saldo pozostają. Nie scala się godzin kilku historii; wybierany jest jeden zgodny zapis z największą liczbą użytecznych godzin w zakresie.</li></ul></details>
       <details id="pvAnnualAssumptions" class="panel pv-section" hidden><summary>Założenia roczne i zakres zwrotu — przeczytaj</summary><ul class="pv-muted"><li>To estymator z założeń, nie naprawiona historia. Energia roczna = dołożone kWp × roczny uzysk AC. Nie mnożymy krótkiego okresu przez 365 dni i nie tworzymy fikcyjnych godzin.</li><li>Uzysk AC uwzględnia przyjęte straty i ograniczenia. Nie stosujemy dodatkowo eta 95%, sprawności baterii, profilu DC ani limitu 12 kW. Dobierz realny uzysk do orientacji/zacienienia/instalacji; ten kalkulator nie potwierdza parametrów sprzętu.</li><li>Cała przyjęta energia AC nowych paneli jest wyceniana jako eksport. Nie odejmujemy autokonsumpcji/baterii i nie doliczamy oszczędności G13. Nie gwarantujemy rzeczywistego eksportu.</li><li>Cena to gotowy przypis depozytu za kWh, nie surowa RCE. Nie mnożymy jej drugi raz przez 1,23. Roczna korzyść to wykorzystana część przypisu; depozyt nie jest gotówką.</li><li>Warianty ostrożny/środkowy/korzystny różnią się tylko ceną o zadane ±%. To umowne scenariusze, NIE prognoza ani statystyczny przedział ufności. Rzeczywisty wynik może być poza nimi.</li><li>Prosty okres zwrotu zakłada powtarzalną roczną korzyść; bez degradacji, serwisu, finansowania, dyskontowania, przyszłych zmian cen/przepisów. Koszt dotyczy całej samej rozbudowy. Brak dodatniego kosztu nie blokuje energii/korzyści, ale uniemożliwia ROI; przy zerowej korzyści nie ma skończonego zwrotu.</li></ul></details>
       <details id="pvAnnualReferencePanel" class="panel pv-section" hidden><summary>Opcjonalnie: odniesienie do już zapisanej historii</summary><p class="pv-muted">Nie jest potrzebne do rocznego szacunku. Używamy tylko zgodnego całego zapisu oraz zachowanych dat i założeń modelu eksportu. Nie pobieramy HA, nie importujemy CSV i nie naprawiamy luk. Brak odniesienia nie blokuje ROI. Cena krótkiego okresu nie jest automatycznie średnią roczną.</p><button id="pvAnnualReference" type="button" class="btn-ghost">Porównaj z zapisanym okresem — tylko odczyt</button><div id="pvAnnualReferenceSummary" role="status">Odniesienie opcjonalne; nie zmienia rocznych założeń.</div><button id="pvAnnualUseReference" type="button" class="btn-secondary" disabled>Świadomie użyj tej ceny jako założenia rocznego</button></details>
       <section class="panel pv-section"><h3 id="pvCalculationHeading">3 · Oblicz różnicę dwóch modeli</h3>
@@ -126,7 +129,7 @@
     </form>
     <section id="pvDiagnosticsSection" class="panel pv-section" aria-labelledby="pvDiagnosticsHeading"><h3 id="pvDiagnosticsHeading">Diagnostyka danych historycznych</h3><div id="pvDiagnostics">Po pobraniu sprawdzimy kompletność, granice czasu oraz rozbieżności. Brak danych nie oznacza zerowych przepływów.</div></section>
     <section id="pvResults" class="pv-section" aria-live="polite" hidden></section>`;
-  const basicFields = new Set(['annualYieldAcKwhPerKwp', 'annualDepositPlnKwh', 'addedKwp', 'exportPvToAcEta', 'chargeCurrentA', 'dischargeCurrentA', 'inverterAcKw', 'addedInverterAcKw', 'exportAcKw', 'costPln']);
+  const basicFields = new Set(['availableAnnualAcKwhPerKwp', 'annualYieldAcKwhPerKwp', 'annualDepositPlnKwh', 'addedKwp', 'exportPvToAcEta', 'chargeCurrentA', 'dischargeCurrentA', 'inverterAcKw', 'addedInverterAcKw', 'exportAcKw', 'costPln']);
   for (const f of fields) $(U.etaKeys.includes(f[0]) ? 'pvEfficiencyParameters' : basicFields.has(f[0]) ? 'pvParameters' : 'pvAdvancedParameters').append(field(...f));
   for (const [key, label] of entities) $('pvEntities').append(field(key, label, '', true));
   const bools = ['unlimitedInverter', 'unlimitedAddedInverter', 'unlimitedExport', 'allowDstAggregation', 'acceptScenario', 'autoRefresh'];
@@ -216,6 +219,7 @@
   function invalidate() { result = null; $('pvResults').replaceChildren(); $('pvResults').hidden = true; }
   function invalidateDiagnostics(message) { prepared = null; $('pvDiagnostics').textContent = message; }
   function showDataStatus() {
+    if (availableMode()) { showAvailableDataStatus(); return; }
     if (annualMode()) { $('pvDataStatus').textContent = 'Roczny szacunek nie wymaga historii. Istniejące zapisy zachowane; niczego nie pobieramy.'; return; }
     if (exportMode()) {
       const picked = X.pickDataset(settings, dataset, exportDataset);
@@ -250,6 +254,12 @@
   }
   function renderGridReport(g) {
     const box = $('pvGridReport'); box.replaceChildren();
+    if (availableMode()) {
+      const text = 'eLicznik: potwierdzone oba kierunki w ' + g.selected.validBlocks + '/' + g.selected.expectedBlocks + ' przedziałach; konflikty: ' + g.conflictingBlocks + '. Braki/konflikty nie blokują innych godzin; źródła nie są sumowane. Do zmniejszenia poboru potrzebny jest potwierdzony import; do limitowanego eksportu także eksport.';
+      $('pvGridAutoStatus').textContent = text; box.append(el('p',text));
+      if (gridDataset) box.append(el('p','CSV już zapisany w PV: '+gridDataset.sources.join(', ')+'. Nie trzeba ponownie importować.'));
+      return;
+    }
     const c = g.selection;
     const info = 'eLicznik · ' + gridLabel(g.source) + (g.direction === 'export_only' ? ' · tylko eksport: ' : ': ') + g.selected.validBlocks + '/' + g.selected.expectedBlocks
       + ' kompletnych przedziałów. Z danych dodatku: ' + c.sharedBlocks + '; z zapisanego CSV PV: ' + c.csvBlocks
@@ -402,6 +412,7 @@
     return prepared;
   }
   function renderResult(r) {
+    if (r.kind === 'available_pv_home_export') { renderAvailableResult(r); return; }
     if (r.kind === 'annual_pv_estimate') { renderAnnualResult(r); return; }
     if (r.kind === 'incremental_pv_export_valuation') { renderExportResult(r); return; }
     const box = $('pvResults'); box.replaceChildren(); box.hidden = false;
@@ -451,8 +462,115 @@
     if (settings.unlimitedInverter || settings.unlimitedExport || (settings.topology === 'ac_added' && settings.unlimitedAddedInverter))
       box.append(el('p', 'UWAGA: jawny wariant idealizowany bez co najmniej jednego limitu mocy. Nie jest potwierdzonym wariantem sprzętowym.', 'pv-notice'));
   }
+  function availableMode(s = settings) { return R.isAvailable(s); }
+  function availablePick() { return R.pickDataset(settings, dataset, exportDataset, availableDataset); }
+  function showAvailableDataStatus() {
+    const p = availablePick();
+    $('pvDataStatus').textContent = p ? 'Wybrano JEDEN zapis: ' + ({full:'pełna historia PV',export:'historia eksportowa',available:'osobna historia dostępnych godzin'}[p.origin])
+      + ', ' + p.match.startDate + ' – ' + p.match.endDate + '. Użyteczne PV: ' + p.match.knownHours + '/' + p.match.expectedHours
+      + ' h wybranego okresu. Nie łączymy godzin różnych zapisów. Krótszy lub niepełny zapis nie blokuje znanej części wyniku.'
+      : 'Brak pasującej historii PV z użytecznymi godzinami. Możesz pobrać dostępny zakres przyciskiem poniżej. Nie wymaga 100% pokrycia; bez danych kwota/ROI pozostaną nieznane, nie prognozowane z 0,30 zł.';
+    if (availableCacheError) $('pvDataStatus').textContent += ' Osobny zapis dostępnych godzin nie został odczytany: ' + availableCacheError + '. Nie jest nadpisywany; inne zapisy pozostają.';
+  }
+  function applyAvailableView() {
+    root.dataset.calculationMode = R.mode;
+    $('pvAvailableInfo').hidden = false; $('pvAvailableRules').hidden = false;
+    for (const key of ['depositUseFraction', 'annualDepositPlnKwh', 'annualPriceSpreadFraction', 'annualYieldAcKwhPerKwp']) {
+      const n = $('pv-' + key); n.parentElement.hidden = true; n.disabled = true;
+    }
+    const n = $('pv-availableAnnualAcKwhPerKwp'); n.parentElement.hidden = false; n.disabled = busy || !ready || formBlocked();
+    $('pv-autoRefresh').parentElement.hidden = true; $('pv-autoRefresh').disabled = true;
+    $('pv-allowDstAggregation').parentElement.hidden = true; $('pv-allowDstAggregation').disabled = true;
+    $('pvExportAssumptions').hidden = true;
+    $('pvFetch').textContent = 'Pobierz dostępne dane PV — osobny zapis';
+    $('pvFetch').disabled = busy || !ready || formBlocked() || !!availableCacheError;
+    $('pvModeNotice').textContent = 'Dodatkowe PV najpierw zmniejsza godzinowy pobór z sieci (przybliżenie niezaspokojonego zużycia), dopiero reszta trafia na eksport. Bez rekonstrukcji H i bez zmienionej pracy baterii. Luki nie blokują całego wyniku: pokazujemy znane podsumy i zakres niewyceniony. Nie zmieniamy historii, realnego salda ani innych kalkulatorów.';
+    $('pvModeHint').textContent = 'Dostępne godziny: uniknięty zakup według zapisanych stawek G13 + dodatkowy depozyt według RCE TEJ godziny. Roczny ROI korzysta osobno z jawnego uzysku AC oraz podziału/wyceny w kompletnie wycenionej próbie. Nie mnożymy krótkiego okresu do roku i nie używamy stałej ceny 0,30 zł.';
+    $('pvScenarioIntro').textContent = 'Zachowaj wybrany okres i zapisane CSV. Podaj dodatkowe kWp, podłączenie, limity i sprawność DC → AC dla godzin. Roczny uzysk AC jest osobnym założeniem, nie sumą brakujących pomiarów. Koszt dotyczy całej samej rozbudowy.';
+    $('pvAdvancedSummary').textContent = 'Zaawansowane: obecne kWp i względny uzysk profilu';
+    $('pv-costPln').parentElement.querySelector('small').textContent = 'Cały koszt samej rozbudowy. Pusty/zerowy koszt nie blokuje podsum za okresu, ale nie daje okresu ani stopy zwrotu.';
+    $('pv-exportAcKw').parentElement.querySelector('small').textContent = 'Limit dotyczy wyłącznie nadwyżki PO pokryciu poboru. 0 blokuje dodatkowy eksport, nie zużycie na miejscu i nie zmienia historii.';
+    $('pvEntityHelp').textContent = 'Tylko licznik PV DC i opcjonalna moc. Używamy zapisanych danych również z części wybranego okresu; nie pobieramy AC charge, BMS, SOC ani H. Nowe pobranie z lukami ma oddzielny atomowy zapis i nie zastępuje wcześniejszych historii.';
+    $('pvGridExplanation').textContent = 'Zapisany pobór eLicznika jest przybliżeniem niezaspokojonego zużycia, nie osobnym pomiarem domu: może obejmować ładowanie magazynu. Nie symulujemy zmiany jego pracy. Cały rekord pochodzi z wybranego źródła; braki i konflikty dotyczą tylko odpowiednich godzin, bez dopisywania flag.';
+    $('pvGridArchiveHelp').textContent = 'Już zapisanych CSV nie trzeba importować ponownie. Nowy zestaw zastępuje tylko osobne archiwum CSV PV. Braki przepływów/cen pomijamy w odpowiednich podsumach; nie stają się zmierzonym zerem. Powtórzona godzina DST bez jednoznacznego przypisania jest wyłączona tylko z nowego szacunku.';
+    $('pvAvailableInfo').textContent = 'Priorytet energii: zmniejszenie poboru → eksport nadwyżki. Podział wyliczamy co godzinę, NIE jako stałe 100% autokonsumpcji. Finansowo przyjmujemy wykorzystanie pełnego dodatkowego depozytu na późniejsze rozliczenie energii domu — nie gotówkę i nie mnożnik wypłaty 30%. Stawki zakupu G13 to aktualnie zapisane stawki strefowe, nie archiwum zmian taryfy. Cena eksportu pochodzi z historycznego RCE, nie z ręcznej średniej.';
+    $('pvCalculationHeading').textContent = '3 · Policz dostępne godziny i orientacyjny rok';
+    $('pvCalculate').textContent = 'Oblicz dostępne godziny + roczny ROI';
+    $('pvAcceptanceText').textContent = 'Akceptuję przybliżenie: dodatkowe PV zmniejsza historyczny pobór z sieci, a nadwyżka trafia na eksport; bez symulacji baterii. Niepełne godziny/ceny dają tylko podsumy. Roczny uzysk AC oraz reprezentatywność podziału/cen są założeniami. Depozyt wykorzystany na energię ≠ wypłata gotówki.';
+  }
+  const availableReasons = {
+    missing_energy:'Brak przyrostu PV', negative_energy:'Ujemny przyrost PV', after_gap:'Brak bufora / godzina po luce', sum_disagrees:'Rozbieżność PV change / Δsum', pv_unusable:'PV nieużyteczne',
+    dst_ambiguous:'Powtórzona godzina DST bez jednoznacznego dopasowania', grid_conflict:'Konflikt źródeł eLicznika', grid_import_missing:'Brak potwierdzonego poboru',
+    grid_export_missing:'Brak eksportu do ustalenia wolnego limitu', buy_price_missing:'Brak stawki zakupu przy zmniejszeniu poboru', rce_missing:'Brak RCE przy dodatkowym eksporcie',
+  };
+  function renderAvailableDiagnostics(r) {
+    const box = $('pvDiagnostics'); box.replaceChildren(); const t = r.total;
+    box.append(el('p', 'Dostępne dane — bez blokady całego okresu. PV: ' + t.pvKnownHours + '/' + t.expectedHours + ' h; pełny podział dodatkowej energii: '
+      + t.flowKnownHours + ' h; pełna wycena: ' + t.fullyValuedHours + ' h, w tym dodatnie dodatkowe AC: ' + t.pricedPositiveHours + ' h.', 'pv-notice'));
+    box.append(table(['Powód niepoliczenia części wyniku', 'Godziny'], Object.entries(r.reasons).map(([k,v]) => [availableReasons[k] || k, String(v)]), 'Liczniki powodów mogą się pokrywać. Nie usunięto rekordów i nie zastąpiono ich zerami.'));
+    box.append(el('p', 'Znana energia bez pełnej informacji o przepływie: ' + kwh(t.unknownFlowAcKwh) + '. Bez ceny zakupu: ' + kwh(t.purchaseUnpricedKwh)
+      + '; bez RCE eksportu: ' + kwh(t.exportUnpricedKwh) + '. Brakujące PV nie ma oszacowanych kWh; nie dopisujemy energii.', 'pv-muted'));
+    if (r.gridWarning) box.append(el('p', r.gridWarning, 'pv-notice'));
+    if (r.profileWarnings.length) renderIssueList(box, r.profileWarnings);
+    const excluded = r.rows.filter(x => x.reasons.length), detail = el('details');
+    detail.append(el('summary', 'Pokaż pominięte / niepełne przedziały (' + excluded.length + ')'));
+    detail.append(table(['Czas lokalny / UTC', 'Długość', 'Powody'], excluded.map(x => [x.key + ' / ' + new Date(x.ts).toISOString(), x.durationHours + ' h', x.reasons.map(k=>availableReasons[k]||k).join('; ')])));
+    box.append(detail);
+  }
+  function renderAvailableResult(r) {
+    const box = $('pvResults'); box.replaceChildren(); box.hidden = false;
+    const t = r.total, a = r.annual, s = r.assumptions;
+    box.append(el('h3', 'Dostępne godziny · zużycie → eksport · ' + s.startDate + ' – ' + s.endDate));
+    box.append(el('p', 'To znane PODSUMY, nie pełna kwota z brakujących godzin ani gwarantowana dolna granica rzeczywistej korzyści. Wycena zakupu i eksportu jest osobna; nieznana cena jednego składnika nie kasuje znanej wartości drugiego. Pełna wycena: ' + t.fullyValuedHours + '/' + t.expectedHours + ' h.', 'pv-notice'));
+    const cards = el('div', undefined, 'pv-metrics');
+    for (const [label,value,id] of [
+      ['Znana suma korzyści za dostępne dane', money(t.knownBenefitPln), 'pvAvailableBenefit'],
+      ['Znana oszczędność zakupu energii', money(t.knownPurchasePln), 'pvAvailablePurchase'],
+      ['Znany dodatkowy przypis depozytu', money(t.knownDepositPln), 'pvAvailableDeposit'],
+      ['Godziny kompletnie wycenione / oczekiwane', t.fullyValuedHours + ' / ' + t.expectedHours, 'pvAvailableCoverage'],
+    ]) { const card=el('div',undefined,'panel pv-metric'); card.append(el('span',label,'pv-muted')); const val=el('strong',value,'mono');val.id=id;card.append(val);cards.append(card); }
+    box.append(cards);
+    box.append(el('p', 'Dodatkowe AC najpierw pokrywa min(dodatkowe AC, potwierdzony pobór eLicznika); dopiero reszta jest eksportowana do wolnego limitu. Pobór może zawierać ładowanie baterii — to przybliżenie, NIE osobny pomiar samego domu. Nie odtwarzamy H, SOC ani pracy magazynu.', 'pv-muted'));
+    box.append(table(['Znane przepływy dodatkowego PV', 'Wybrany okres — znana część'], [
+      ['Dodatkowy profil DC',kwh(t.addedDcKwh)],['Dodatkowe AC po falowniku, przed podziałem',kwh(t.availableAcKwh)],
+      ['Zmniejszenie poboru z sieci',kwh(t.avoidedImportKwh)],['Eksport NADWYŻKI',kwh(t.extraExportKwh)],
+      ['Niewykorzystane AC wskutek limitu eksportu',kwh(t.curtailedAcKwh)],['AC bez znanego pełnego podziału',kwh(t.unknownFlowAcKwh)],
+    ]));
+    box.append(el('p', 'Przypis depozytu przyjmujemy w pełnej wartości do późniejszego rozliczenia energii domu. Nie mnożymy go przez refundRate, 30% ani zakres ±30% starego estymatora. Depozyt ≠ gotówka. Nie doliczamy drugi raz oszczędności zakupu do energii wyeksportowanej.', 'pv-notice'));
+    box.append(table(['Miesiąc / wybrana część', 'Pełna wycena / h okresu', 'Mniej zakupu · kWh', 'Eksport · kWh', 'Znane oszczędności zakupu', 'Znany przypis', 'Znana suma'], Object.entries(r.monthly).map(([mk,m])=>[
+      mk,m.fullyValuedHours+' / '+m.expectedHours,kwh(m.avoidedImportKwh),kwh(m.extraExportKwh),money(m.knownPurchasePln),money(m.knownDepositPln),money(m.knownBenefitPln)]), 'Niepełne miesiące nie są przedstawiane jako pełne. Sumy zaokrąglone mogą się różnić o grosz.'));
+    box.append(el('h3','Osobny orientacyjny rok + ROI'));
+    box.append(el('p', 'Roczna energia AC = dodatkowe ' + number(s.addedKwp,3) + ' kWp × założone ' + number(s.availableAnnualAcKwhPerKwp,2)
+      + ' kWh/kWp/rok = ' + kwh(a.energyAcKwh) + '. To osobne założenie energii po konwersji/falowniku, przed podziałem na zużycie, eksport i ograniczenie eksportu. Nie mnożymy roku ponownie przez η i nie przeliczamy liczby dni historycznych na 365.', 'pv-muted'));
+    const annualCards=el('div',undefined,'pv-metrics');
+    const statusText = a.paybackStatus === 'reference_unknown' ? (a.status === 'yield_missing' ? 'podaj roczny uzysk AC' : 'brak dodatniej w pełni wycenionej próby') : annualPayback(a);
+    for (const [label,value,id] of [
+      ['Roczna korzyść z założeń i wycenionej próby',money(a.benefitPln),'pvAvailableAnnualBenefit'],
+      ['Prosty okres zwrotu',statusText,'pvAvailablePayback'],
+      ['Prosta roczna stopa zwrotu',a.annualSimpleRoiPct === null ? 'nieznana' : number(a.annualSimpleRoiPct)+'%','pvAvailableAnnualRoi'],
+    ]) {const card=el('div',undefined,'panel pv-metric');card.append(el('span',label,'pv-muted'));const val=el('strong',value,'mono');val.id=id;card.append(val);annualCards.append(card);} box.append(annualCards);
+    box.append(table(['Składnik', 'Roczny szacunek'], [['Oszczędność zakupu',money(a.purchasePln)],['Depozyt do wykorzystania na energię',money(a.depositPln)],
+      ['Zmniejszenie poboru',kwh(a.avoidedImportKwh)],['Eksport nadwyżki',kwh(a.exportKwh)],['Niewykorzystane AC wskutek limitu eksportu',kwh(a.curtailedAcKwh)]]));
+    box.append(el('p', 'Próba rocznego przeliczenia: ' + a.samplePositiveHours + ' godzin z dodatnim AC i PEŁNĄ wyceną, ' + kwh(a.sampleAcKwh)
+      + '. Korzyść na kWh dostępnego AC: zakup ' + number(a.purchasePerAcKwh,6) + ' zł + depozyt ' + number(a.depositPerAcKwh,6) + ' zł. '
+      + 'Ważona cena samego eksportu: ' + number(a.exportWeightedDepositPlnKwh,6) + ' zł/kWh (nie jest ceną dla całego PV). Nie użyto 0,30 zł jako ceny zastępczej.', 'pv-muted'));
+    box.append(el('p', 'UWAGA: podział i ceny z tej próby NIE muszą reprezentować całego roku. Braki i sezonowość mogą zawyżyć LUB zaniżyć ROI. Godziny z częściową wyceną są w znanych podsumach okresu, ale NIE w próbie rocznej. Nie jest to prognoza ani przedział ufności.', 'pv-notice'));
+    box.append(el('p', 'Zakup: aktualnie zapisane stawki stref G13, nie archiwum zmian taryfy. Eksport: zapisane godzinowe RCE i niezmieniona funkcja PV (ujemne RCE → 0; mnożnik 1,23 od lutego 2025). Nie znamy przyszłych cen. Koszt samej rozbudowy: '
+      + money(s.costPln) + '. Zwrot = koszt / roczna korzyść; bez degradacji, serwisu, finansowania i dyskonta. Brak korzyści nie daje skończonego zwrotu. Realnego salda nie zmieniono.', 'pv-muted'));
+  }
+  async function computeAvailable() {
+    if (formBlocked()) throw new Error('Zapis PV jest niedostępny; nie nadpisujemy go automatycznie.');
+    const epoch=annualReferenceEpoch, current={...settings, entities:{...settings.entities}}, picked=availablePick();
+    await window.G13PvReadOnly.whenReady;
+    if (epoch!==annualReferenceEpoch || !availableMode()) return null;
+    const r=R.estimate(picked ? picked.match.series : {}, current, window.G13PvReadOnly.getSnapshot(), gridDataset);
+    r.cacheOrigin=picked ? picked.origin : null;
+    if (epoch!==annualReferenceEpoch || !availableMode()) return null;
+    prepared=r;renderAvailableDiagnostics(r);return r;
+  }
+
   function annualMode(s = settings) { return A.isAnnual(s); }
-  function modeOf(s) { return annualMode(s) ? A.mode : X.mode(s); }
+  function modeOf(s) { return availableMode(s) ? R.mode : annualMode(s) ? A.mode : X.mode(s); }
   function formBlocked() { return blocked && !(settingsReadable && annualMode()); }
   function clearAnnualReference() {
     annualReferenceEpoch++; annualReference = null; annualReferenceBusy = false;
@@ -569,17 +687,20 @@
     say('Świadomie przepisano cenę okresu jako założenie roczne, nie prognozę. Ponownie zaakceptuj założenia i oblicz. Nie przeliczono produkcji okresu na rok.');
   }
 
-  function exportMode() { return !annualMode() && X.mode(settings) === 'export_only'; }
-  function dataModule() { return exportMode() ? X : D; }
+  function exportMode() { return !annualMode() && !availableMode() && X.mode(settings) === 'export_only'; }
+  function dataModule() { return availableMode() ? R : exportMode() ? X : D; }
   function applyModeView() {
+    $('pvAvailableInfo').hidden = true; $('pvAvailableRules').hidden = true;
+    $('pv-autoRefresh').parentElement.hidden = false; $('pv-allowDstAggregation').parentElement.hidden = false;
+    $('pvFetch').textContent = 'Pobierz dane HA dla tej karty';
     if (annualMode()) { applyAnnualView(); return; }
     restoreHistoricalView();
-    const only = exportMode();
+    const only = exportMode() || availableMode();
     root.dataset.calculationMode = only ? 'export_only' : 'dynamic_battery';
     const oldFields = new Set(['capacityKwh', 'minSocPct', 'maxSocPct', 'initialSocPct', 'chargeCurrentA',
       'dischargeCurrentA', 'batteryVoltageV', 'loadScale', ...U.etaKeys]);
     for (const [key] of fields) {
-      const hide = Object.prototype.hasOwnProperty.call(A.defaults, key) || (only ? oldFields.has(key) : key === 'exportPvToAcEta');
+      const hide = Object.prototype.hasOwnProperty.call(A.defaults, key) || Object.prototype.hasOwnProperty.call(R.defaults, key) || (only ? oldFields.has(key) : key === 'exportPvToAcEta');
       const input = $('pv-' + key); input.parentElement.hidden = hide;
       if (hide) input.disabled = true;
     }
@@ -647,6 +768,7 @@
       : 'Rozumiem warunkowy charakter zapotrzebowania/źródeł, strat i ograniczeń. Akceptuję wpisane założenia wyłącznie jako scenariusz, bez uznawania historii za fizycznie zwalidowaną.';
     $('pvExportEtaInfo').textContent = 'Jedyna użyta sprawność: PV DC → AC ' + number(typeof settings.exportPvToAcEta === 'number' && Number.isFinite(settings.exportPvToAcEta) ? settings.exportPvToAcEta * 100 : null, 6)
       + '%. To edytowalne założenie, NIE pomiar. Nie stosujemy strat baterii, A/V, SOC ani mnożnika zapotrzebowania domu. Ich dotychczasowe wartości są zachowane.';
+    if (availableMode()) applyAvailableView();
   }
   function renderIssueList(box, issues) {
     const detail = el('details'); detail.append(el('summary', 'Pełna lista problemów i ostrzeżeń (' + issues.length + ')'));
@@ -733,6 +855,7 @@
   async function diagnose() {
     if (busy || !ready) return;
     if (annualMode()) { await showAnnualReference(); return; }
+    if (availableMode()) { try { const r=await computeAvailable(); if(r) say('Pokazano pokrycie i przyczyny niepełnych podsum. Luki nie blokują innych godzin.'); } catch(e) { say(e.message,true); } return; }
     try { const p = await prepareData(); say(p.ok ? 'Dane złożono bez luk blokujących. Ostrzeżenia i brak fizycznej walidacji pozostają widoczne.' : 'Model zablokowany: niepełne/niepoprawne wejścia lub niezaakceptowany krok DST. Sprawdź diagnostykę.', !p.ok); }
     catch (e) { say(e.message, true); }
   }
@@ -747,6 +870,11 @@
         say('Obliczono orientacyjny rok i prosty ROI z jawnych założeń. Bez pobierania lub naprawiania historii, bez zmiany depozytu i HA.');
         return;
       }
+      if (availableMode()) {
+        if (!settings.acceptScenario) throw new Error('Zaznacz akceptację założeń dostępnych godzin i rocznego ROI.');
+        const r=await computeAvailable(); if(!r) return; result=r; renderResult(result);
+        say('Policzono znane części: mniej zakupu → eksport nadwyżki. Luki i nieznane ceny opisano osobno; niczego nie dopisano do realnego depozytu.'); return;
+      }
       const p = await prepareData();
       if (!p.ok) throw new Error('Nie uruchomiono modelu: ' + p.diagnostics.errorCount + ' problemów blokujących. Nie wycinamy godzin ani nie zamykamy bilansu na siłę.');
       if (!settings.acceptScenario) throw new Error('Zaznacz akceptację założeń scenariusza (punkt 3); to nie akceptacja jakości pomiarów.');
@@ -759,8 +887,8 @@
   }
   async function fetchData() {
     if (annualMode()) return; // roczny estimator nie uruchamia HA nawet przy zachowanym autoRefresh
-    if (busy || !ready || blocked) return;
-    let sig, span, ids; const onlyExport = exportMode(), module = dataModule();
+    if (busy || !ready || blocked || (availableMode() && availableCacheError)) return;
+    let sig, span, ids; const onlyExport = exportMode(), partial = availableMode(), module = dataModule();
     try { sig = module.signature(settings); span = D.range(settings.startDate, settings.endDate); ids = module.entityIds(settings); }
     catch (e) { say(e.message, true); return; }
     busy = true; invalidate(); invalidateDiagnostics('Pobieranie nowego zestawu. Poprzednie dane pozostają zapisane do chwili poprawnego zakończenia.'); updateFields();
@@ -784,7 +912,7 @@
           }
           text = await response.text();
         } finally { clearTimeout(timeout); }
-        parts.push(D.parseStatsCsv(text)); cursor = end;
+        parts.push(partial ? R.parseFetchedCsv(text) : D.parseStatsCsv(text)); cursor = end;
       }
       const series = D.mergeSeries(parts);
       if (onlyExport) {
@@ -799,9 +927,15 @@
           'Nie aktywowano nowego profilu PV DC: poprawne przyrosty i bufor dla ' + profileCheck.diagnostics.pvKnownHours
           + '/' + span.hours + ' godzin. Poprzednie historie zachowano; braków/ujemnych przyrostów nie zastępujemy zerem.');
       }
-      if (dataModule().signature(settings) !== sig || exportMode() !== onlyExport) throw new Error('Formularz zmienił się podczas pobierania; nie aktywowano innych danych.');
-      const saved = onlyExport ? await store.saveExportDataset(series, sig) : await store.saveDataset(series, sig);
+      let partialCoverage=null; if(partial) partialCoverage=R.validateFetched(series,settings);
+      if (dataModule().signature(settings) !== sig || exportMode() !== onlyExport || availableMode() !== partial) throw new Error('Formularz zmienił się podczas pobierania; nie aktywowano innych danych.');
+      const saved = partial ? await store.saveAvailableDataset(series, sig) : onlyExport ? await store.saveExportDataset(series, sig) : await store.saveDataset(series, sig);
       const next = { series, signature: sig, fetchedAt: saved.fetchedAt };
+      if(partial) {
+        availableDataset=next; showDataStatus();
+        $('pvDiagnostics').textContent='Zapisano dostępne PV: '+partialCoverage.knownHours+'/'+partialCoverage.expectedHours+' h. To częściowy zbiór, nie naprawiona historia. Uzupełnij założenia i oblicz.';
+        say('Zapisano osobno dostępne godziny PV ('+partialCoverage.knownHours+'/'+partialCoverage.expectedHours+'). Poprzednie pełne historie, CSV i realne saldo zachowane.'+(saved.cleanupWarning?' Nie udało się posprzątać poprzednich części tego zapisu.':'')); return;
+      }
       if (onlyExport) exportDataset = next; else dataset = next;
       showDataStatus();
       const p = await prepareData();
@@ -819,7 +953,7 @@
     }
     busy = true; invalidate(); invalidateDiagnostics('Czyszczenie własnej przestrzeni PV…'); updateFields();
     try {
-      await store.reset(); dataset = null; exportDataset = null; prepared = null; gridDataset = null; pendingGrid = null; settings = defaults(); blocked = false; settingsReadable = true; clearAnnualReference(); gridMigrationNotice = ''; modeMigrationNotice = '';
+      await store.reset(); dataset = null; exportDataset = null; availableDataset = null; availableCacheError = ''; prepared = null; gridDataset = null; pendingGrid = null; settings = defaults(); blocked = false; settingsReadable = true; clearAnnualReference(); gridMigrationNotice = ''; modeMigrationNotice = '';
       $('pvGridFile').value = ''; $('pvGridPreview').textContent = 'Brak osobnego CSV PV.'; $('pvGridReport').textContent = 'Sprawdź zapis eLicznika przyciskiem tylko do odczytu.';
       invalidate(); fill(); showDataStatus(); $('pvDiagnostics').textContent = 'Wyczyszczono wyłącznie kartę PV.';
       $('pvSaveStatus').textContent = ''; say('Usunięto wyłącznie własne dane i ustawienia karty PV.');
@@ -828,13 +962,13 @@
   }
   function setupAuto() {
     if (autoTimer) clearInterval(autoTimer);
-    autoTimer = settings.autoRefresh && !annualMode() ? setInterval(() => { if (!root.hidden) fetchData(); }, 3600000) : null;
+    autoTimer = settings.autoRefresh && !annualMode() && !availableMode() ? setInterval(() => { if (!root.hidden) fetchData(); }, 3600000) : null;
   }
   $('pvForm').addEventListener('submit', e => e.preventDefault());
   $('pvForm').addEventListener('change', async e => {
     if (!ready || busy || (formBlocked() && !(e.target.id === 'pv-calculationMode' && settingsReadable))) return;
     const next = readForm(e.target.id);
-    if (e.target.id === 'pv-calculationMode' || (['export_only', A.mode].includes(modeOf(next)) && e.target.id !== 'pv-acceptScenario')) next.acceptScenario = false;
+    if (e.target.id === 'pv-calculationMode' || (['export_only', A.mode, R.mode].includes(modeOf(next)) && e.target.id !== 'pv-acceptScenario')) next.acceptScenario = false;
     if (e.target.id === 'pv-annualDepositPlnKwh') { next.annualPriceOrigin = pendingAnnualPriceOrigin; pendingAnnualPriceOrigin = null; }
     if (U.etaKeys.some(k => e.target.id === 'pv-' + k)) next.efficiencyMode = 'custom';
     if (e.target.id === 'pv-efficiencyMode') {
@@ -845,6 +979,7 @@
     if (e.target.id === 'pv-calculationMode') modeMigrationNotice = '';
     if (e.target.id === 'pv-efficiencyMode' && settings.efficiencyMode === 'custom') $('pvAdvanced').open = true;
     clearAnnualReference(); invalidate(); invalidateDiagnostics('Zmieniły się ustawienia. Sprawdź dane ponownie dla aktualnego wyboru.'); fill(); showDataStatus(); setupAuto();
+    if (availableMode()) say('Sprawdź założenia zużycie → eksport i zaakceptuj scenariusz. Dostępne dane policzymy bez wymogu kompletności; niczego nie pobieramy automatycznie.');
     if (annualMode()) say('Sprawdź roczne założenia i zaakceptuj scenariusz. Historia HA/CSV nie jest wymagana; niczego nie pobieramy.');
     resetArmed = false; $('pvReset').textContent = 'Wyczyść tylko kartę PV';
     showGridReport(); // świeża kopia źródeł, bez pobierania HA i bez zapisu legacy
@@ -864,7 +999,7 @@
   document.querySelector('[data-tab="pv"]').addEventListener('click', () => {
     if (result) { invalidate(); clearAnnualReference(); say(annualMode() ? 'Ponownie otwarto kartę — przelicz roczne założenia; nie trzeba pobierać historii.' : 'Ponownie otwarto kartę — przelicz na bieżącej migawce eLicznika i cen.'); }
     if (ready && !blocked) showGridReport();
-    if (ready && settings.autoRefresh) fetchData();
+    if (ready && settings.autoRefresh && !availableMode()) fetchData();
   });
   fill();
   (async () => {
@@ -888,12 +1023,17 @@
       if (cached) dataset = { signature: cached.signature, fetchedAt: cached.fetchedAt, series: D.mergeSeries(cached.parts) };
       const cachedExport = await store.loadExportDataset();
       if (cachedExport) exportDataset = { signature: cachedExport.signature, fetchedAt: cachedExport.fetchedAt, series: D.mergeSeries(cachedExport.parts) };
+      try {
+        const cachedAvailable=await store.loadAvailableDataset();
+        if(cachedAvailable) availableDataset={signature:cachedAvailable.signature,fetchedAt:cachedAvailable.fetchedAt,series:D.mergeSeries(cachedAvailable.parts)};
+      } catch(e) { availableCacheError=e.message; } // separate new cache cannot block older modes
     } catch (e) { blocked = true; say('Nie udało się odczytać własnego zapisu PV: ' + e.message + '. Nie nadpisano historii. Możesz jawnie wyczyścić wyłącznie kartę PV.', true); }
     finally {
       ready = true; fill(); showDataStatus(); setupAuto(); root.dataset.ready = 'true';
       if (annualMode() && settingsReadable) say('Roczny szacunek korzysta z jawnych założeń. Nie wymaga kompletnej historii ani ponownego importu.');
       if (!blocked) showGridReport();
-      if (!root.hidden && settings.autoRefresh && !blocked) fetchData();
+      if (availableMode() && !blocked) say('Wybrano dostępne godziny: zużycie → eksport i roczny ROI. Nie trzeba mieć kompletnej historii ani wgrywać zapisanego CSV ponownie.');
+      if (!root.hidden && settings.autoRefresh && !blocked && !availableMode()) fetchData();
     }
   })();
 })();
