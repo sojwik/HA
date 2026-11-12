@@ -36,8 +36,8 @@
     return { start, end, hours: (end - start) / HOUR };
   }
 
-  function csvRows(text) {
-    // RFC4180, tylko separator przecinkowy z naszego endpointu; HTML 200 nie jest CSV.
+  function csvRows(text, separator = ',') {
+    // Jawny separator: przecinek dla własnego endpointu HA, średnik dla eLicznika.
     const rows = []; let row = [], cell = '', quoted = false;
     const s = String(text).replace(/^\uFEFF/, '');
     for (let i = 0; i < s.length; i++) {
@@ -46,7 +46,7 @@
         if (quoted && s[i + 1] === '"') { cell += '"'; i++; }
         else if (quoted || cell === '') quoted = !quoted;
         else throw new Error('Nieprawidłowy cudzysłów w CSV.');
-      } else if (c === ',' && !quoted) { row.push(cell); cell = ''; }
+      } else if (c === separator && !quoted) { row.push(cell); cell = ''; }
       else if ((c === '\n' || c === '\r') && !quoted) {
         if (c === '\r' && s[i + 1] === '\n') i++;
         row.push(cell); if (row.some(x => x !== '')) rows.push(row); row = []; cell = '';
@@ -84,6 +84,7 @@
       seen.add(key);
       const v = { ts };
       for (const f of ['change', 'sum', 'mean', 'min', 'max']) v[f] = num(r[f], f + ', ' + r.start_utc);
+      if (r.power_unit && r.power_unit.trim()) v.powerUnit = r.power_unit.trim();
       if (!series[r.statistic_id]) series[r.statistic_id] = [];
       series[r.statistic_id].push(v);
     }
@@ -104,6 +105,10 @@
           for (const f of ['change', 'sum', 'mean', 'min', 'max']) {
             if (raw[f] !== null && !finite(raw[f])) throw new Error('Uszkodzona wartość w zapisie PV.');
             r[f] = raw[f];
+          }
+          if (raw.powerUnit !== undefined) {
+            if (typeof raw.powerUnit !== 'string' || raw.powerUnit.length > 32) throw new Error('Uszkodzona jednostka mocy PV.');
+            r.powerUnit = raw.powerUnit;
           }
           const old = maps[id].get(r.ts);
           if (old && JSON.stringify(old) !== JSON.stringify(r)) throw new Error('Sprzeczne statystyki tej samej encji i czasu UTC.');
@@ -131,14 +136,139 @@
   }
   function sumOrNull(values) { return values.every(finite) ? values.reduce((s, v) => s + v, 0) : null; }
 
-  function prepare(seriesInput, settings, shared) {
+  // Osobny, jawny format Tauron eLicznik: etykieta KOŃCA godziny 1–24.
+  // Żadnego wywołania parsera, akumulatora ani saveState starej karty.
+  const GRID_FORMAT = 'elicznik-end-v1';
+  function gridCalendar() {
+    const days = new Map();
+    return function (day) {
+      if (!validDate(day)) throw new Error('Nieprawidłowa data eLicznika.');
+      if (!days.has(day)) {
+        const counts = Object.create(null), a = midnight(day), b = midnight(nextDay(day));
+        for (let t = a; t < b; t += HOUR) { const h = Number(localKey(t).slice(-2)); counts[h] = (counts[h] || 0) + 1; }
+        days.set(day, counts);
+      }
+      return days.get(day);
+    };
+  }
+  function validateGridDataset(data) {
+    if (!data || data.format !== GRID_FORMAT || !Array.isArray(data.rows) || !data.rows.length || data.rows.length > 18000
+      || !Array.isArray(data.sources) || !data.sources.length || data.sources.length > 48
+      || data.sources.some(s => typeof s !== 'string' || !s || s.length > 256)) throw new Error('Uszkodzony format osobnego eLicznika PV.');
+    const calendar = gridCalendar(), seen = new Set(), rows = [];
+    for (const r of data.rows) {
+      if (!r || !validDate(r.date) || !Number.isInteger(r.hour) || r.hour < 0 || r.hour > 23) throw new Error('Uszkodzona godzina eLicznika PV.');
+      const key = r.date + '_' + String(r.hour).padStart(2, '0'), count = calendar(r.date)[r.hour];
+      if (!count || r.key !== key || seen.has(key) || r.expectedCount !== count) throw new Error('Powtórzona/niespójna godzina eLicznika PV.');
+      seen.add(key);
+      if (r.strefa !== null && (typeof r.strefa !== 'string' || !/^T\d{1,3}$/.test(r.strefa))) throw new Error('Nieprawidłowa strefa eLicznika PV.');
+      for (const [n, value, flag] of [['importCount', 'poborPoZbil', 'hasImport'], ['exportCount', 'oddaniePoZbil', 'hasExport']]) {
+        if (!Number.isInteger(r[n]) || r[n] < 0 || r[n] > count || r[flag] !== (r[n] === count)
+          || (r[n] === 0 ? r[value] !== null : !finite(r[value]) || r[value] < 0)) throw new Error('Nieprawidłowy kierunek/kompletność eLicznika PV.');
+      }
+      if (!r.importCount && !r.exportCount) throw new Error('Pusty rekord eLicznika PV.');
+      rows.push({ key, date: r.date, hour: r.hour, strefa: r.strefa, expectedCount: count,
+        importCount: r.importCount, exportCount: r.exportCount, hasImport: r.hasImport, hasExport: r.hasExport,
+        poborPoZbil: r.poborPoZbil, oddaniePoZbil: r.oddaniePoZbil });
+    }
+    rows.sort((a, b) => a.key.localeCompare(b.key));
+    if (range(rows[0].date, rows.at(-1).date).hours > 732 * 25) throw new Error('Za długi zakres eLicznika PV.');
+    return { format: GRID_FORMAT, sources: data.sources.slice(), rows };
+  }
+  function parseGridCsvFiles(files) {
+    if (!Array.isArray(files) || !files.length || files.length > 48) throw new Error('Wybierz 1–48 oryginalnych CSV eLicznika.');
+    let bytes = 0;
+    const calendar = gridCalendar(), map = new Map(), sources = [];
+    for (const file of files) {
+      if (!file || typeof file.text !== 'string' || typeof file.name !== 'string' || !file.name || file.name.length > 256) throw new Error('Nieprawidłowy plik eLicznika.');
+      bytes += new TextEncoder().encode(file.text).byteLength;
+      if (bytes > 16 * 1024 * 1024) throw new Error('CSV eLicznika: limit 16 MB łącznie.');
+      const records = csvRows(file.text, ';'), head = (records.shift() || []).map(s => s.trim().toLowerCase());
+      if (new Set(head).size !== head.length || !['data', 'strefa', 'wartość', 'rodzaj', 'status'].every(x => head.includes(x)))
+        throw new Error('Wymagany oryginalny CSV eLicznika: Data;Strefa;Wartość;Rodzaj;Status (godziny końcowe 1–24).');
+      if (!records.length) throw new Error('Pusty CSV eLicznika: ' + file.name);
+      sources.push(file.name);
+      for (let i = 0; i < records.length; i++) {
+        const cells = records[i].map(x => x.trim()), ctx = file.name + ', wiersz ' + (i + 2);
+        if (cells.length !== head.length) throw new Error('Liczba kolumn eLicznika: ' + ctx);
+        const get = name => cells[head.indexOf(name)];
+        const match = /^(20\d{2}-\d{2}-\d{2}) (\d{1,2}):00$/.exec(get('data'));
+        if (!match || !validDate(match[1]) || +match[2] < 1 || +match[2] > 24) throw new Error('Wymagana data i końcowa godzina 1–24: ' + ctx);
+        const date = match[1], hour = +match[2] - 1, expected = calendar(date)[hour];
+        if (!expected) throw new Error('Nieistniejąca godzina Europe/Warsaw: ' + ctx);
+        const type = get('rodzaj').toLowerCase().replace(/\s+/g, ' ');
+        const direction = type === 'pobrana po zbilansowaniu [kwh]' ? 'import'
+          : type === 'oddana po zbilansowaniu [kwh]' ? 'export' : null;
+        if (!direction) throw new Error('Nieznany kierunek/jednostka eLicznika: ' + ctx);
+        if (get('status').toLowerCase() !== 'licznik') throw new Error('Niepotwierdzony status pomiaru (wymagany „licznik”): ' + ctx);
+        const raw = get('wartość');
+        if (!/^\d+(?:[.,]\d+)?$/.test(raw) || !finite(Number(raw.replace(',', '.')))) throw new Error('Brak/ujemna/niepoprawna energia eLicznika: ' + ctx);
+        const value = Number(raw.replace(',', '.')), zone = get('strefa') || null;
+        if (zone !== null && !/^T\d{1,3}$/.test(zone)) throw new Error('Niepoprawna strefa eLicznika: ' + ctx);
+        const key = date + '_' + String(hour).padStart(2, '0');
+        if (!map.has(key)) map.set(key, { key, date, hour, strefa: zone, expectedCount: expected,
+          importCount: 0, exportCount: 0, poborPoZbil: null, oddaniePoZbil: null, hasImport: false, hasExport: false });
+        const r = map.get(key);
+        if (r.strefa !== zone) throw new Error('Sprzeczne strefy w jednej godzinie: ' + ctx);
+        const count = direction + 'Count', energy = direction === 'import' ? 'poborPoZbil' : 'oddaniePoZbil';
+        if (r[count] >= expected) throw new Error('Duplikat kierunku/godziny (także między plikami): ' + ctx);
+        r[count]++; r[energy] = (r[energy] === null ? 0 : r[energy]) + value;
+        r.hasImport = r.importCount === expected; r.hasExport = r.exportCount === expected;
+      }
+    }
+    return validateGridDataset({ format: GRID_FORMAT, sources, rows: Array.from(map.values()) });
+  }
+  function inspectGrid(grid, startDate, endDate) {
+    const span = range(startDate, endDate), keys = new Set();
+    for (let t = span.start; t < span.end; t += HOUR) keys.add(localKey(t));
+    const out = { expectedHours: span.hours, expectedBlocks: keys.size, presentBlocks: 0, validBlocks: 0,
+      missingRows: 0, missingImportFlags: 0, missingExportFlags: 0, rejectedImportFlags: 0, rejectedExportFlags: 0,
+      invalidImportValues: 0, invalidExportValues: 0 };
+    for (const key of keys) {
+      const r = own(grid, key) ? grid[key] : null;
+      if (!r || typeof r !== 'object') { out.missingRows++; continue; }
+      out.presentBlocks++;
+      if (r.hasImport === undefined) out.missingImportFlags++;
+      if (r.hasExport === undefined) out.missingExportFlags++;
+      if (r.hasImport !== true) out.rejectedImportFlags++;
+      if (r.hasExport !== true) out.rejectedExportFlags++;
+      const imp = finite(r.poborPoZbil) && r.poborPoZbil >= 0, exp = finite(r.oddaniePoZbil) && r.oddaniePoZbil >= 0;
+      if (!imp) out.invalidImportValues++;
+      if (!exp) out.invalidExportValues++;
+      if (r.hasImport === true && r.hasExport === true && imp && exp) out.validBlocks++;
+    }
+    return out;
+  }
+  function gridView(shared, settings, imported) {
+    const legacy = shared && shared.hourlyElicznik || {}, source = settings.gridSource || 'shared';
+    if (!['shared', 'csv'].includes(source)) throw new Error('Nieprawidłowe źródło eLicznika PV.');
+    let grid = legacy;
+    if (source === 'csv') {
+      if (!imported) throw new Error('Wybrano osobny CSV eLicznika, ale nie zapisano go jeszcze w karcie PV.');
+      grid = Object.fromEntries(validateGridDataset(imported).rows.map(r => [r.key, r]));
+    }
+    const conflicts = new Set();
+    if (source === 'csv') for (const key of Object.keys(grid)) {
+      const a = grid[key], b = legacy[key];
+      if (!b) continue;
+      if (['poborPoZbil', 'oddaniePoZbil'].some(k => finite(a[k]) && finite(b[k]) && Math.abs(a[k] - b[k]) > EPS)
+        || (a.strefa && b.strefa && a.strefa !== b.strefa)) conflicts.add(key);
+    }
+    const activeConflicts = Array.from(conflicts).filter(k => k.slice(0, 10) >= settings.startDate && k.slice(0, 10) <= settings.endDate);
+    return { grid, conflicts, diagnostics: { source,
+      shared: inspectGrid(legacy, settings.startDate, settings.endDate), selected: inspectGrid(grid, settings.startDate, settings.endDate),
+      conflictingBlocks: activeConflicts.length } };
+  }
+
+  function prepare(seriesInput, settings, shared, importedGrid) {
     const span = range(settings.startDate, settings.endDate);
     entityIds(settings);
     const series = mergeSeries([seriesInput]);
     const entities = settings.entities, maps = Object.create(null);
     for (const id of Object.keys(series)) maps[id] = new Map(series[id].map(r => [r.ts, r]));
     const issues = [], issueIndex = new Map();
-    const grid = shared && shared.hourlyElicznik || {}, rce = shared && shared.rceHourly || {}, rates = shared && shared.zoneRates || {};
+    const gridInfo = gridView(shared, settings, importedGrid);
+    const grid = gridInfo.grid, rce = shared && shared.rceHourly || {}, rates = shared && shared.zoneRates || {};
     function issue(code, ts, channel, severity, message, value) {
       const id = code + ':' + ts + ':' + channel;
       if (issueIndex.has(id)) {
@@ -169,7 +299,7 @@
     }
     const hourly = [], groups = new Map();
     let negativeResidualHours = 0, residualBelowMinus02Hours = 0, residualKnownHours = 0;
-    let residualSum = 0, pvPowerKnownHours = 0, pvPowerApproxKwh = 0, socRangeFlags = 0;
+    let residualSum = 0, pvPowerKnownHours = 0, pvPowerApproxKwh = 0, socRangeFlags = 0, powerUnknownUnitHours = 0;
     for (let ts = span.start; ts < span.end; ts += HOUR) {
       const key = localKey(ts), conditional = settings.loadMode === 'conditional';
       const h = { ts, key,
@@ -188,10 +318,14 @@
       } else h.residual = null;
       const powerMap = maps[entities.pvPower], power = powerMap && powerMap.get(ts);
       if (power && finite(power.mean) && power.mean >= 0) {
-        pvPowerKnownHours++; pvPowerApproxKwh += power.mean; // zadeklarowana jednostka kW, 1 h
-        if (h.pv === 0 && power.mean > 0.1) issue('stalled_pv', ts, 'pv', 'warning', 'Zerowy przyrost PV mimo mean mocy >0,1 kW. Bez zastępowania licznika mocą.', power.mean);
-        if (finite(h.pv) && Math.abs(h.pv - power.mean) > Math.max(0.2, power.mean * 0.2))
-          issue('power_disagrees', ts, 'pv', 'warning', 'PV change różni się od przybliżenia mean mocy × 1 h (próg max 0,2 kWh / 20%).', h.pv - power.mean);
+        const meanKw = power.powerUnit === 'kW' ? power.mean : power.powerUnit === 'W' ? power.mean / 1000 : null;
+        if (meanKw === null) powerUnknownUnitHours++;
+        else {
+          pvPowerKnownHours++; pvPowerApproxKwh += meanKw;
+          if (h.pv === 0 && meanKw > 0.1) issue('stalled_pv', ts, 'pv', 'warning', 'Zerowy przyrost PV mimo mean mocy >0,1 kW. Bez zastępowania licznika mocą.', meanKw);
+          if (finite(h.pv) && Math.abs(h.pv - meanKw) > Math.max(0.2, meanKw * 0.2))
+            issue('power_disagrees', ts, 'pv', 'warning', 'PV change różni się od przybliżenia mean mocy × 1 h (próg max 0,2 kWh / 20%, jednostka jawna).', h.pv - meanKw);
+        }
       }
       const socMap = maps[entities.soc], soc = socMap && socMap.get(ts);
       if (soc && [soc.min, soc.max].every(finite) && (soc.min < 0 || soc.max > 100 || soc.min > soc.max || soc.max - soc.min > 20)) {
@@ -202,6 +336,8 @@
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key).push(h);
     }
+    if (powerUnknownUnitHours) issue('power_unit_unknown', span.start, 'pvPower', 'warning',
+      'Nieznana jednostka mocy w historii/cache. Nie porównano jej z kWh i nie odgadnięto jednostki z wielkości liczby. Pobierz ponownie własne dane HA karty PV; liczniki energii nie zostały zmienione.', powerUnknownUnitHours);
     const rows = [], historical = Object.create(null);
     let dstBlocks = 0, zeroImportPositiveAcBlocks = 0, negativeHouseBlocks = 0;
     for (const [key, hs] of groups) {
@@ -210,6 +346,8 @@
         && finite(g.poborPoZbil) && g.poborPoZbil >= 0 && finite(g.oddaniePoZbil) && g.oddaniePoZbil >= 0;
       if (!gridOk) issue('grid_missing', ts, 'elicznik', settings.loadMode === 'conditional' ? 'error' : 'warning',
         'Brak pełnych nieujemnych kierunków eLicznika z flagami hasImport/hasExport. Stary/niepełny zapis nie oznacza 0.');
+      if (gridInfo.conflicts.has(key)) issue('grid_source_conflict', ts, 'elicznik', 'error',
+        'Osobny CSV różni się energią/strefą od odczytanej kopii dotychczasowych danych. Nie nadpisano różnicy; wymaga wyjaśnienia przed symulacją.');
       if (durationHours !== 1) {
         dstBlocks++;
         issue('dst_aggregate', ts, 'time', settings.allowDstAggregation === true ? 'warning' : 'error',
@@ -246,7 +384,7 @@
     }
     const errors = issues.filter(x => x.severity === 'error');
     return { ok: errors.length === 0, physicalValidation: false, rows, hourly, historical, issues,
-      diagnostics: { expectedHours: span.hours, intervalCount: rows.length, dstBlocks,
+      diagnostics: { expectedHours: span.hours, intervalCount: rows.length, dstBlocks, grid: gridInfo.diagnostics, powerUnknownUnitHours,
         residualKnownHours, residualMissingHours: span.hours - residualKnownHours,
         residualSumKwh: residualKnownHours === span.hours ? residualSum : null, residualKnownSumKwh: residualSum,
         negativeResidualHours, residualBelowMinus02Hours, zeroImportPositiveAcBlocks, negativeHouseBlocks,
@@ -254,5 +392,6 @@
         socRangeFlags, missingBuyPriceBlocks: rows.filter(r => r.buyPlnKwh === null).length,
         missingRcePriceBlocks: rows.filter(r => r.rcePlnMwh === null).length, errorCount: errors.length } };
   }
-  return Object.freeze({ parseStatsCsv, mergeSeries, prepare, entityIds, signature, range, midnight, nextDay, localKey });
+  return Object.freeze({ parseStatsCsv, mergeSeries, prepare, entityIds, signature, range, midnight, nextDay, localKey,
+    parseGridCsvFiles, validateGridDataset, inspectGrid, gridView });
 });

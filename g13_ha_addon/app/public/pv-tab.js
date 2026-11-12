@@ -4,15 +4,16 @@
   'use strict';
   const root = document.getElementById('tab-pv');
   if (!root) return;
-  const M = window.G13PvModel, D = window.G13PvData, S = window.G13PvStore;
-  if (!M || !D || !S || !window.G13PvReadOnly) {
+  const M = window.G13PvModel, D = window.G13PvData, S = window.G13PvStore, U = window.G13PvForm;
+  if (!M || !D || !S || !U || !window.G13PvReadOnly) {
     root.textContent = 'Nie załadowano modułów PV. Dotychczasowe karty działają niezależnie; odśwież stronę.';
     return;
   }
-  const defaults = () => ({
-    startDate: '2026-09-01', endDate: '2026-10-31', loadMode: 'conditional', topology: '',
+  const defaults = () => U.effective({
+    startDate: '2026-09-01', endDate: '2026-10-31', loadMode: 'conditional', gridSource: 'shared', topology: '',
     existingKwp: 9.54, addedKwp: null, addedYieldFactor: 1,
     capacityKwh: 14.336, minSocPct: 10, maxSocPct: 100, initialSocPct: 10,
+    chargeCurrentA: null, dischargeCurrentA: null, batteryVoltageV: U.voltage, efficiencyMode: 'estimate-v1',
     chargeDcKw: null, dischargeDcKw: null, pvToAcEta: null, pvToBatteryEta: null,
     batteryToAcEta: null, acToBatteryEta: null, storeChargeEta: null, storeDischargeEta: null,
     inverterAcKw: null, addedInverterAcKw: null, exportAcKw: null,
@@ -33,8 +34,9 @@
     ['minSocPct', 'Rezerwa modelu · % SOC', '10% tylko w modelu. Rzeczywistego progu 30% nie zmieniamy.'],
     ['maxSocPct', 'Górny SOC modelu · %', 'To samo okno w obu modelach; odejmujemy rezerwę tylko raz.'],
     ['initialSocPct', 'SOC na początku okresu · %', '10% to kandydat z analizy, nie pomiar graniczny. Identyczny start obu modeli.'],
-    ['chargeDcKw', 'Moc ładowania · kW DC', 'Na zaciskach baterii. Wpisz scenariusz; 2/4/6 kW nie zostały zatwierdzone.'],
-    ['dischargeDcKw', 'Moc rozładowania · kW DC', 'Osobny parametr. 0 blokuje dany kierunek; puste pole jest nieznane.'],
+    ['chargeCurrentA', 'Prąd ładowania baterii · A DC', 'Wpisz prąd scenariusza. 0 blokuje ładowanie; puste pole pozostaje nieznane.'],
+    ['dischargeCurrentA', 'Prąd rozładowania baterii · A DC', 'Osobny prąd scenariusza. Nie jest to prąd AC ani ustawienie wysyłane do falownika.'],
+    ['batteryVoltageV', 'Napięcie odniesienia baterii · V DC', 'Domyślnie modelowe 51,2 V (16 × 3,2 V). Nie jest bieżącym pomiarem ani stałym napięciem rzeczywistej baterii. Zmiana V przy stałych A zmienia limit kW modelu.'],
     ['inverterAcKw', 'Limit istniejącej hybrydy · kW AC', 'Wspólny budżet konwersji AC PV + bateria + ładowanie zwrotne w kroku.'],
     ['addedInverterAcKw', 'Limit dodatkowego falownika · kW AC', 'Dotyczy wyłącznie wariantu dodatkowego falownika AC.'],
     ['exportAcKw', 'Limit eksportu całego układu · kW AC', '0 oznacza blokadę eksportu. Nie jest to moc umowna importu.'],
@@ -53,9 +55,9 @@
     ['pv', 'PV DC · licznik kWh'], ['acOutput', 'Wyjście falownika AC · licznik kWh'],
     ['acCharge', 'Ładowanie AC · licznik kWh'], ['bmsCharge', 'BMS ładowanie DC · licznik kWh'],
     ['bmsDischarge', 'BMS rozładowanie DC · licznik kWh'], ['soc', 'SOC · statystyki %'],
-    ['pvPower', 'Moc PV · statystyki kW (tylko diagnostyka)'], ['house', 'Niezależny dom AC · licznik kWh (opcjonalny)'],
+    ['pvPower', 'Moc PV · jednostka sprawdzana w HA (tylko diagnostyka)'], ['house', 'Niezależny dom AC · licznik kWh (opcjonalny)'],
   ];
-  let settings = defaults(), dataset = null, result = null, prepared = null;
+  let settings = defaults(), dataset = null, result = null, prepared = null, gridDataset = null, pendingGrid = null;
   let store, busy = false, blocked = false, ready = false, resetArmed = false, autoTimer = null;
   const $ = id => document.getElementById(id);
   const number = (x, digits = 2) => typeof x === 'number' && Number.isFinite(x)
@@ -75,7 +77,7 @@
     wrap.append(lab, input); if (help) wrap.append(el('small', help)); return wrap;
   }
   root.innerHTML = `
-    <header class="pv-heading"><div><span class="eyebrow">Osobny kalkulator · 0.3.5</span><h2>Rozbudowa PV</h2></div><span class="pv-badge">Symulacja scenariusza</span></header>
+    <header class="pv-heading"><div><span class="eyebrow">Osobny kalkulator · 0.3.6</span><h2>Rozbudowa PV</h2></div><span class="pv-badge">Symulacja scenariusza</span></header>
     <div class="pv-notice"><strong>Nie jest to zwalidowana rekonstrukcja pomiarów.</strong> Porównujemy dwa modele: obecne PV i PV po rozbudowie — z dynamiczną obecną baterią, bez planowego ładowania z sieci. Dane historyczne i ich rozbieżności pokazujemy osobno. Nic nie trafia do salda depozytu, autokonsumpcji ani kalkulatora drugiego magazynu.</div>
     <form id="pvForm" novalidate>
       <section class="panel pv-section"><div class="panel-header-row"><h3>1 · Dane i okres</h3><span class="pv-muted">Daty włącznie · Europe/Warsaw</span></div>
@@ -84,11 +86,23 @@
         <details><summary>Niezależne źródła HA — pokaż / zmień</summary><p class="pv-muted">Liczniki: kWh i przyrost change. BMS/SOC/moc są diagnostyką, nie sterują symulacją. Encje BMS można odczytać z opcji dodatku; ich wpisanie tutaj nie zmienia tych opcji ani growatt_entities.</p><div id="pvEntities" class="pv-grid"></div></details>
         <div class="pv-actions"><button id="pvFetch" type="button" class="btn-secondary">Pobierz dane HA dla tej karty</button><button id="pvDiagnose" type="button" class="btn-ghost">Sprawdź dane</button><label class="pv-check"><input id="pv-autoRefresh" type="checkbox"> Odświeżaj dane przy wejściu i co 60 min w otwartej karcie</label></div>
         <div id="pvDataStatus" class="pv-muted" role="status">Brak własnej historii PV.</div>
+        <details id="pvGridDetails"><summary>eLicznik dla PV — diagnostyka i osobny CSV</summary>
+          <p class="pv-muted">Odczyt poniżej nie wymaga konsoli. Starszych zapisów nie naprawiamy przez dopisanie flag. Pełny oryginalny CSV można sprawdzić i zapisać WYŁĄCZNIE tutaj; Depozyt i Magazyn pozostają bez zmian.</p>
+          <div class="pv-field"><label for="pv-gridSource">Źródło eLicznika używane w PV</label><select id="pv-gridSource"><option value="shared">Dotychczasowe dane — tylko odczyt</option><option value="csv">Osobny, sprawdzony CSV zapisany tylko w PV</option></select></div>
+          <div class="pv-actions"><button id="pvGridCheck" type="button" class="btn-ghost">Sprawdź zapis eLicznika — tylko odczyt</button></div><div id="pvGridReport" role="status">Kliknij, aby zobaczyć liczbę rekordów, brakujących znaczników i nieprawidłowych wartości.</div>
+          <label for="pvGridFile">Oryginalne CSV Tauron eLicznik (oba kierunki, etykiety końca godziny 1–24)</label><input id="pvGridFile" type="file" accept=".csv,text/csv" multiple>
+          <p class="pv-muted">Wybierz razem wszystkie pliki nowego zestawu. Zastąpi on poprzedni osobny zestaw PV, nie połączy się z nim i nie zmieni źródłowych CSV. Brak kierunku pozostaje nieznany; powtórzona godzina wymaga obu rekordów każdego kierunku i osobnej zgody na krok 2 h. Inny format/status pomiaru jest odrzucany.</p>
+          <p id="pvGridPreview" role="status">Wybór pliku przygotowuje tylko podgląd. Zapis wymaga przycisku poniżej.</p><button id="pvGridImport" type="button" class="btn-secondary">Zapisz i użyj CSV tylko w PV</button>
+        </details>
         <label class="pv-check"><input id="pv-allowDstAggregation" type="checkbox"> Akceptuję przybliżenie wspólnego kroku 2 h dla powtórzonej godziny zmiany czasu. RCE tej godziny pozostaje nieznane, jeśli cache nie rozróżnia obu godzin.</label>
       </section>
-      <section class="panel pv-section"><h3>2 · Jawne założenia, nie ustawienia urządzenia</h3>
+      <section class="panel pv-section"><h3>2 · Prosty formularz scenariusza</h3><p class="pv-muted">Podaj dodatkowe PV, prądy baterii oraz ograniczenia instalacji. Nie musisz samodzielnie wpisywać sześciu sprawności. Ustawienia nie sterują urządzeniami.</p>
         <div class="pv-field"><label for="pv-topology">Scenariusz podłączenia nowych paneli</label><select id="pv-topology"><option value="">Wybierz scenariusz — podłączenie nie jest jeszcze ustalone</option><option value="dc_shared">DC: nowe i obecne panele na wspólnym falowniku hybrydowym</option><option value="ac_added">AC: nowy falownik PV, istniejąca hybryda może przyjąć nadwyżkę AC</option></select><small>Wariant AC zakłada dostępność takiego sterowania ładowaniem; nie potwierdza możliwości WIT. Połączenia elektryczne/MPPT wymagają osobnego projektu.</small></div>
         <div id="pvParameters" class="pv-grid"></div>
+        <p id="pvCurrentInfo" class="pv-notice"></p>
+        <div class="pv-field"><label for="pv-efficiencyMode">Sprawności i straty</label><select id="pv-efficiencyMode"><option value="estimate-v1">Orientacyjne straty — gotowe założenia, nie pomiar</option><option value="custom">Własne wartości — ustawienia zaawansowane</option></select></div>
+        <p id="pvEfficiencyInfo" class="pv-muted"></p>
+        <details id="pvAdvanced"><summary>Zaawansowane: bateria, napięcie, własne sprawności i pozostałe założenia</summary><div id="pvAdvancedParameters" class="pv-grid"></div><h4>Sprawności torów — wszystkie użyte wartości są jawne</h4><p class="pv-muted">W wariancie orientacyjnym pola są tylko do odczytu. Nie wyznaczamy sprawności z ilorazu historycznych liczników. Aby wpisać własne wartości, wybierz „Własne wartości” powyżej.</p><div id="pvEfficiencyParameters" class="pv-grid"></div></details>
         <div class="pv-checks"><label class="pv-check"><input id="pv-unlimitedInverter" type="checkbox"> Jawnie idealizuję: bez limitu konwersji istniejącej hybrydy</label><label class="pv-check"><input id="pv-unlimitedAddedInverter" type="checkbox"> Jawnie idealizuję: bez limitu dodatkowego falownika AC</label><label class="pv-check"><input id="pv-unlimitedExport" type="checkbox"> Jawnie idealizuję: bez limitu eksportu</label></div>
         <p id="pvWindow" class="pv-notice"></p>
         <details><summary>Co model upraszcza?</summary><ul class="pv-muted"><li>Nowe PV = historyczne PV DC × dodatkowe kWp / 9,54 × względny uzysk. To profil po historycznych ograniczeniach — nie odzyskujemy utraconej produkcji ani nie znamy przyszłego zacienienia.</li><li>Stałe/średnie moce w kroku 1 h (wyjątkowo 2 h): brak gwarancji ograniczeń chwilowych, przepięć, limitów prądu/napięcia MPPT lub zgodności instalacyjnej.</li><li>Wariant AC: nowy falownik najpierw zasila dom, istniejące PV DC ma pierwszeństwo ładowania. Konwersje w obu kierunkach dzielą budżet mocy istniejącej hybrydy.</li><li>Liniowe SOC → energia; jawne sprawności torów i baterii. Brak modelu starzenia, temperatury, poboru własnego i podtrzymania SOC. Żadnych dopasowanych „strat”, aby zamknąć historię.</li><li>W obu modelach identyczny start, progi i strategia. Wynik nie zawiera korzyści z obniżenia rzeczywistego progu 30% lub zmiany ręcznego sterowania.</li><li>Zakup: aktualnie zapisane stawki G13 odczytane bez modyfikacji. Depozyt: RCE godzinowe, ujemne ceny → 0, mnożnik 1,23 od lutego 2025. Nieznanych cen nie zastępujemy zerem ani stawką płaską.</li><li>Brak rocznego przeliczenia i okresu zwrotu. Końcowy zapas energii nie jest wyceniany. Zmiana depozytu nie jest wypłatą gotówkową.</li></ul></details>
@@ -96,15 +110,16 @@
       <section class="panel pv-section"><h3>3 · Oblicz różnicę dwóch modeli</h3>
         <label class="pv-check"><input id="pv-acceptScenario" type="checkbox"> Rozumiem warunkowy charakter zapotrzebowania/źródeł, strat i ograniczeń. Akceptuję wpisane założenia wyłącznie jako scenariusz, bez uznawania historii za fizycznie zwalidowaną.</label>
         <div class="pv-actions"><button id="pvCalculate" type="button" class="btn-primary">Porównaj obecne PV i rozbudowę</button><button id="pvReset" type="button" class="btn-danger-ghost">Wyczyść tylko kartę PV</button></div>
-        <p id="pvStatus" role="status" aria-live="polite">Uzupełnij moc rozbudowy, scenariusz podłączenia, moce i sprawności. Puste pola nie są wartościami domyślnymi.</p><p id="pvSaveStatus" class="pv-muted"></p>
+        <p id="pvStatus" role="status" aria-live="polite">Uzupełnij moc rozbudowy, prądy baterii, podłączenie i limity. Sprawności orientacyjne są gotowe, ale wymagają akceptacji scenariusza. Nieznanych ograniczeń nie zastępujemy ukrytym brakiem limitu.</p><p id="pvSaveStatus" class="pv-muted"></p>
       </section>
     </form>
     <section class="panel pv-section" aria-labelledby="pvDiagnosticsHeading"><h3 id="pvDiagnosticsHeading">Diagnostyka danych historycznych</h3><div id="pvDiagnostics">Po pobraniu sprawdzimy kompletność, granice czasu oraz rozbieżności. Brak danych nie oznacza zerowych przepływów.</div></section>
     <section id="pvResults" class="pv-section" aria-live="polite" hidden></section>`;
-  for (const f of fields) $('pvParameters').append(field(...f));
+  const basicFields = new Set(['addedKwp', 'chargeCurrentA', 'dischargeCurrentA', 'inverterAcKw', 'addedInverterAcKw', 'exportAcKw', 'costPln']);
+  for (const f of fields) $(U.etaKeys.includes(f[0]) ? 'pvEfficiencyParameters' : basicFields.has(f[0]) ? 'pvParameters' : 'pvAdvancedParameters').append(field(...f));
   for (const [key, label] of entities) $('pvEntities').append(field(key, label, '', true));
   const bools = ['unlimitedInverter', 'unlimitedAddedInverter', 'unlimitedExport', 'allowDstAggregation', 'acceptScenario', 'autoRefresh'];
-  const texts = ['startDate', 'endDate', 'loadMode', 'topology'];
+  const texts = ['startDate', 'endDate', 'loadMode', 'topology', 'gridSource', 'efficiencyMode'];
   function restore(s) {
     const n = defaults();
     for (const [key] of fields) if (Object.prototype.hasOwnProperty.call(s, key)) n[key] = s[key];
@@ -113,26 +128,33 @@
     for (const [key] of entities) if (s.entities && typeof s.entities[key] === 'string') n.entities[key] = s.entities[key];
     // Baza instalacji nie migruje z obcych ustawień.
     n.existingKwp = 9.54;
-    return n;
+    return U.restore(s, n);
+  }
+  function inputText(key, value) {
+    return value === null || value === undefined ? ''
+      : String(percentages.has(key) ? Number((value * 100).toFixed(6)) : value);
   }
   function fill() {
-    for (const [key] of fields) $('pv-' + key).value = settings[key] === null || settings[key] === undefined ? ''
-      : percentages.has(key) ? Number((settings[key] * 100).toFixed(6)) : settings[key];
+    for (const [key] of fields) $('pv-' + key).value = inputText(key, settings[key]);
     for (const key of texts) $('pv-' + key).value = settings[key];
     for (const key of bools) $('pv-' + key).checked = settings[key] === true;
     for (const [key] of entities) $('pv-entity-' + key).value = settings.entities[key];
     updateFields();
   }
-  function readForm() {
+  function readForm(changedId) {
     const n = defaults();
     for (const [key] of fields) {
       const raw = $('pv-' + key).value.trim();
-      n[key] = raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) / (percentages.has(key) ? 100 : 1) : null;
+      // Zmiana innego pola nie zaokrągla dawnych ręcznych sprawności tylko
+      // dlatego, że procenty prezentujemy z ograniczoną liczbą cyfr.
+      n[key] = changedId !== 'pv-' + key && raw === inputText(key, settings[key]) ? settings[key]
+        : raw !== '' && Number.isFinite(Number(raw)) ? Number(raw) / (percentages.has(key) ? 100 : 1) : null;
     }
     n.existingKwp = 9.54;
     for (const key of texts) n[key] = $('pv-' + key).value;
     for (const key of bools) n[key] = $('pv-' + key).checked;
     for (const [key] of entities) n.entities[key] = $('pv-entity-' + key).value.trim();
+    n.customEfficiencies = settings.customEfficiencies || null;
     return n;
   }
   function updateFields() {
@@ -140,12 +162,22 @@
     if (!busy && ready && !blocked) {
       const ac = settings.topology === 'ac_added';
       $('pv-addedInverterAcKw').disabled = !ac || settings.unlimitedAddedInverter;
-      $('pv-acToBatteryEta').disabled = !ac;
+      for (const key of U.etaKeys) $('pv-' + key).disabled = settings.efficiencyMode !== 'custom';
+      $('pv-acToBatteryEta').disabled = !ac || settings.efficiencyMode !== 'custom';
       $('pv-unlimitedAddedInverter').disabled = !ac;
       $('pv-inverterAcKw').disabled = settings.unlimitedInverter;
       $('pv-exportAcKw').disabled = settings.unlimitedExport;
       $('pv-entity-house').disabled = settings.loadMode !== 'meter';
+      $('pvGridImport').disabled = !pendingGrid;
     }
+    $('pvCurrentInfo').textContent = 'Przyjęte napięcie modelu: ' + number(settings.batteryVoltageV, 2) + ' V DC. '
+      + 'Ładowanie: ' + number(settings.chargeCurrentA) + ' A → ' + number(settings.chargeDcKw, 3) + ' kW DC; rozładowanie: '
+      + number(settings.dischargeCurrentA) + ' A → ' + number(settings.dischargeDcKw, 3) + ' kW DC. P = I × U / 1000. '
+      + 'To stałe limity mocy modelu; rzeczywiste napięcie zmienia się. Nie jest to gwarancja utrzymania podanego prądu w całym zakresie SOC.';
+    const cycle = U.cycleAcEta(settings);
+    $('pvEfficiencyInfo').textContent = settings.efficiencyMode === 'estimate-v1'
+      ? 'Założenia orientacyjne, NIE pomiar: konwersja AC/DC 95%, tor PV DC do zacisków baterii 98%, zapis i oddanie energii wewnątrz baterii po 98%. Wynikowy cykl AC → bateria → AC: ' + number(cycle * 100, 1) + '% — to iloczyn tych strat, nie dodatkowy mnożnik. Te same wartości w obu modelach.'
+      : 'Zachowano własne sprawności. Rozwiń „Zaawansowane”, aby je sprawdzić lub zmienić. Wynikowy cykl AC → bateria → AC: ' + (cycle === null ? 'nieznany' : number(cycle * 100, 1) + '%') + '. To założenia scenariusza, nie potwierdzona kalibracja.';
     const c = settings.capacityKwh, lo = settings.minSocPct, hi = settings.maxSocPct, initial = settings.initialSocPct;
     const valid = [c, lo, hi, initial].every(x => typeof x === 'number' && Number.isFinite(x));
     $('pvWindow').textContent = valid
@@ -162,6 +194,71 @@
     $('pvDataStatus').textContent = 'Ostatni zapis własnej historii: ' + dataset.fetchedAt + '. '
       + (matches ? 'Zakres i lista encji zgodne z formularzem. Nie jest to potwierdzenie jakości pomiarów.' : 'Zmieniono zakres/kanały — pobierz dane dla aktualnego wyboru. Stare dane zachowano.');
   }
+  function gridSummary(label, q) {
+    return label + ': ' + q.validBlocks + '/' + q.expectedBlocks + ' kompletnych przedziałów (' + q.expectedHours + ' h UTC). '
+      + 'Brak rekordu: ' + q.missingRows + '; bez flag poboru/oddania: ' + q.missingImportFlags + '/' + q.missingExportFlags
+      + '; niepotwierdzone flagi poboru/oddania: ' + q.rejectedImportFlags + '/' + q.rejectedExportFlags
+      + '; nieprawidłowe wartości poboru/oddania: ' + q.invalidImportValues + '/' + q.invalidExportValues + '. Liczniki mogą się pokrywać.';
+  }
+  async function showGridReport() {
+    const box = $('pvGridReport'); box.replaceChildren();
+    try {
+      await window.G13PvReadOnly.whenReady;
+      const shared = window.G13PvReadOnly.getSnapshot();
+      box.append(el('p', gridSummary('Dotychczasowe dane — tylko odczyt', D.inspectGrid(shared.hourlyElicznik, settings.startDate, settings.endDate))));
+      const g = D.gridView(shared, settings, gridDataset).diagnostics;
+      box.append(el('p', 'Źródło używane w PV: ' + (g.source === 'csv' ? 'osobny CSV' : 'dotychczasowe dane') + '. '
+        + gridSummary('Wybrany zakres', g.selected)));
+      if (g.conflictingBlocks) box.append(el('p', 'CSV różni się wartościami/strefą od dotychczasowych zapisów w ' + g.conflictingBlocks
+        + ' przedziałach. Niczego nie nadpisano; przed symulacją trzeba wyjaśnić różnicę.', 'pv-error'));
+      if (gridDataset) box.append(el('p', 'Zapisany osobny zestaw CSV: ' + gridDataset.sources.join(', ') + '. Rekordy: ' + gridDataset.rows.length + '.', 'pv-muted'));
+    } catch (e) { box.append(el('p', e.message, 'pv-error')); }
+  }
+  function readLocalFile(file) {
+    if (typeof file.text === 'function') return file.text();
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader(); reader.onload = () => resolve(reader.result);
+      reader.onerror = () => reject(new Error('Nie udało się odczytać wybranego CSV.'));
+      reader.readAsText(file, 'UTF-8');
+    });
+  }
+  async function previewGridFiles(e) {
+    e.stopPropagation(); // wybór pliku NIE zapisuje ustawień formularza
+    if (busy || !ready || blocked) return;
+    const files = Array.from(e.target.files || []); pendingGrid = null; invalidate();
+    resetArmed = false; $('pvReset').textContent = 'Wyczyść tylko kartę PV';
+    if (!files.length) { $('pvGridPreview').textContent = 'Nie wybrano CSV.'; updateFields(); return; }
+    busy = true; updateFields();
+    try {
+      if (files.length > 48 || files.reduce((n, f) => n + f.size, 0) > 16 * 1024 * 1024) throw new Error('Maksymalnie 48 plików / 16 MB łącznie.');
+      const texts = [];
+      for (const f of files) texts.push({ name: f.name, text: await readLocalFile(f) });
+      pendingGrid = D.parseGridCsvFiles(texts);
+      const map = Object.fromEntries(pendingGrid.rows.map(r => [r.key, r]));
+      $('pvGridPreview').textContent = 'Podgląd — jeszcze NIC nie zapisano. ' + gridSummary('Wybrane CSV', D.inspectGrid(map, settings.startDate, settings.endDate))
+        + ' Zapis zastąpi tylko poprzedni osobny zestaw CSV karty PV, nie doda jego energii ponownie.';
+    } catch (err) { pendingGrid = null; $('pvGridPreview').textContent = 'CSV odrzucony: ' + err.message + ' Poprzedni zapis pozostał bez zmian.'; }
+    finally { busy = false; updateFields(); }
+  }
+  async function importGrid() {
+    if (busy || !ready || blocked || !pendingGrid) return;
+    busy = true; invalidate(); invalidateDiagnostics('Zapis osobnego eLicznika PV…'); updateFields();
+    try {
+      const next = D.validateGridDataset(pendingGrid);
+      const saved = await store.saveGridDataset(next);
+      gridDataset = next; pendingGrid = null; settings.gridSource = 'csv'; fill();
+      let selectionWarning = '';
+      try { await store.saveSettings(settings); }
+      catch (_) { selectionWarning = ' CSV zapisano, ale nie udało się zapisać wyboru źródła. Po ponownym otwarciu sprawdź wybór „Źródło eLicznika”.'; }
+      $('pvGridFile').value = '';
+      $('pvGridPreview').textContent = 'Zapisano CSV wyłącznie w pv-sim-v1-. Nie zaimportowano go do Depozytu ani Magazynu.' + selectionWarning
+        + (saved.cleanupWarning ? ' Nowy zestaw aktywny; usuwanie starych części PV nie powiodło się.' : '');
+      say('Osobny CSV eLicznika zapisany dla PV. Sprawdź dane; samego modelu nie uruchomiono.' + selectionWarning, !!selectionWarning);
+      await showGridReport();
+    } catch (e) { say('Zapis CSV dla PV nie powiódł się: ' + e.message + '. Nie zmieniono dotychczasowych rozliczeń.', true); }
+    finally { busy = false; updateFields(); }
+  }
+
   function table(heads, rows, caption) {
     const scroll = el('div', undefined, 'table-scroll'); const t = el('table');
     if (caption) t.append(el('caption', caption));
@@ -172,11 +269,13 @@
   function diagnostics(p) {
     const box = $('pvDiagnostics'); box.replaceChildren();
     const q = p.diagnostics;
+    box.append(el('p', gridSummary('eLicznik · ' + (q.grid.source === 'csv' ? 'osobny CSV PV' : 'odczyt dotychczasowych danych'), q.grid.selected)));
+    box.append(el('p', 'Moc PV ze znaną jednostką: ' + q.pvPowerKnownHours + '/' + q.expectedHours + ' h; bez potwierdzonej jednostki: ' + q.powerUnknownUnitHours + ' h. Brak jednostki wyłącza tylko porównanie z mocą, nie skaluje liczników kWh.', 'pv-muted'));
     box.append(el('p', 'Oczekiwane godziny UTC: ' + q.expectedHours + ' · kroki modelu: ' + q.intervalCount + ' · kroki 2 h: ' + q.dstBlocks + '. Błędów blokujących: ' + q.errorCount + '.', q.errorCount ? 'pv-error' : 'pv-muted'));
     box.append(el('p', 'Reszta R = PV DC + rozładowanie BMS DC + ładowanie AC − ładowanie BMS DC − wyjście AC. Znane godziny: '
       + q.residualKnownHours + '/' + q.expectedHours + '; reszta < −0,2 kWh: ' + q.residualBelowMinus02Hours
       + '; ujemne reszty ogółem: ' + q.negativeResidualHours + '; suma (tylko pełny okres): ' + kwh(q.residualSumKwh) + '. Nie dopasowujemy strat, by zamknąć ten bilans.'));
-    box.append(el('p', 'Dodatnie ładowanie AC bez importu netto: ' + q.zeroImportPositiveAcBlocks + ' przedziałów. Nietypowe zakresy SOC: ' + q.socRangeFlags
+    box.append(el('p', 'Dodatnie ładowanie AC bez importu netto: ' + q.zeroImportPositiveAcBlocks + ' przedziałów; kontrola sieci możliwa tylko dla ' + q.grid.selected.validBlocks + '/' + q.intervalCount + ' przedziałów. Nietypowe zakresy SOC: ' + q.socRangeFlags
       + '. Brak stawek G13: ' + q.missingBuyPriceBlocks + '; brak jednoznacznego RCE: ' + q.missingRcePriceBlocks + ' przedziałów. Wpływ na kwotę zależy od modelowanych przepływów/przyrostu.', 'pv-muted'));
     const rows = Object.keys(p.historical).sort().map(mk => {
       const m = p.historical[mk], v = f => kwh(m.values[f].totalKwh);
@@ -198,13 +297,15 @@
     if (!dataset) throw new Error('Najpierw pobierz osobną historię PV z HA. Nie używamy uproszczonego cache starej karty.');
     if (dataset.signature !== D.signature(settings)) throw new Error('Zakres lub encje różnią się od zapisanych danych PV. Pobierz aktualny zestaw.');
     await window.G13PvReadOnly.whenReady;
-    prepared = D.prepare(dataset.series, settings, window.G13PvReadOnly.getSnapshot());
+    prepared = D.prepare(dataset.series, settings, window.G13PvReadOnly.getSnapshot(), gridDataset);
     diagnostics(prepared);
     return prepared;
   }
   function renderResult(r) {
     const box = $('pvResults'); box.replaceChildren(); box.hidden = false;
     box.append(el('h3', 'Wynik scenariusza · ' + settings.startDate + ' – ' + settings.endDate));
+    box.append(el('p', $('pvCurrentInfo').textContent, 'pv-muted'));
+    box.append(el('p', $('pvEfficiencyInfo').textContent + ' Użyte sprawności: ' + U.etaKeys.map(k => k + ' ' + (typeof settings[k] === 'number' && Number.isFinite(settings[k]) ? number(settings[k] * 100, 2) + '%' : 'nieustalone')).join('; ') + '.', 'pv-notice'));
     box.append(el('p', 'Różnica: rozbudowa − obecny układ, przy tej samej strategii i starcie. Wyceniono tylko ten okres (' + r.hours + ' h). Źródła G13/RCE to migawka przy obliczeniu; po zmianie danych przelicz ponownie. Wyniku nie zapisano do rozliczeń.', 'pv-muted'));
     const cards = el('div', undefined, 'pv-metrics');
     const metrics = [
@@ -260,6 +361,7 @@
       const p = await prepareData();
       if (!p.ok) throw new Error('Nie uruchomiono modelu: ' + p.diagnostics.errorCount + ' problemów blokujących. Nie wycinamy godzin ani nie zamykamy bilansu na siłę.');
       if (!settings.acceptScenario) throw new Error('Zaznacz akceptację założeń scenariusza (punkt 3); to nie akceptacja jakości pomiarów.');
+      U.validate(settings);
       M.validateConfig(settings);
       result = M.simulate(p.rows, settings);
       renderResult(result);
@@ -279,12 +381,12 @@
         const nextMonth = new Date(Date.UTC(y, m, 1)).toISOString().slice(0, 10);
         const end = Math.min(span.end, D.midnight(nextMonth));
         const qs = new URLSearchParams({ entities: ids.join(','), start: new Date(cursor - 3600000).toISOString(),
-          end: new Date(end).toISOString(), types: 'change,sum,mean,min,max' });
+          end: new Date(end).toISOString(), types: 'change,sum,mean,min,max', power_entity: settings.entities.pvPower || '' });
         say('Pobieranie osobnej historii PV: ' + mk + ' (z 1 h bufora). Bez zapisu do dotychczasowych kart…');
         const controller = new AbortController(), timeout = setTimeout(() => controller.abort(), 65000);
         let text;
         try {
-          const response = await fetch('api/ha/stats.csv?' + qs.toString(), { signal: controller.signal });
+          const response = await fetch('api/pv/stats.csv?' + qs.toString(), { signal: controller.signal });
           if (!response.ok) {
             let detail = 'HTTP ' + response.status;
             try { const j = await response.json(); if (j.error) detail += ': ' + j.error; } catch (_) {}
@@ -314,7 +416,8 @@
     }
     busy = true; invalidate(); invalidateDiagnostics('Czyszczenie własnej przestrzeni PV…'); updateFields();
     try {
-      await store.reset(); dataset = null; prepared = null; settings = defaults(); blocked = false;
+      await store.reset(); dataset = null; prepared = null; gridDataset = null; pendingGrid = null; settings = defaults(); blocked = false;
+      $('pvGridFile').value = ''; $('pvGridPreview').textContent = 'Brak osobnego CSV PV.'; $('pvGridReport').textContent = 'Sprawdź zapis eLicznika przyciskiem tylko do odczytu.';
       invalidate(); fill(); showDataStatus(); $('pvDiagnostics').textContent = 'Wyczyszczono wyłącznie kartę PV.';
       $('pvSaveStatus').textContent = ''; say('Usunięto wyłącznie własne dane i ustawienia karty PV.');
     } catch (e) { blocked = true; say('Nie udało się dokończyć czyszczenia PV: ' + e.message + '. Pozostałe karty nie zostały zmienione.', true); }
@@ -325,13 +428,26 @@
     autoTimer = settings.autoRefresh ? setInterval(() => { if (!root.hidden) fetchData(); }, 3600000) : null;
   }
   $('pvForm').addEventListener('submit', e => e.preventDefault());
-  $('pvForm').addEventListener('change', async () => {
+  $('pvForm').addEventListener('change', async e => {
     if (!ready || busy || blocked) return;
-    settings = readForm(); invalidate(); invalidateDiagnostics('Zmieniły się ustawienia. Sprawdź dane ponownie dla aktualnego wyboru.'); updateFields(); showDataStatus(); setupAuto();
+    const next = readForm(e.target.id);
+    if (U.etaKeys.some(k => e.target.id === 'pv-' + k)) next.efficiencyMode = 'custom';
+    if (e.target.id === 'pv-efficiencyMode') {
+      next.acceptScenario = false;
+      if (next.efficiencyMode === 'custom' && settings.customEfficiencies) Object.assign(next, settings.customEfficiencies);
+    }
+    settings = U.effective(next);
+    if (e.target.id === 'pv-efficiencyMode' && settings.efficiencyMode === 'custom') $('pvAdvanced').open = true;
+    invalidate(); invalidateDiagnostics('Zmieniły się ustawienia. Sprawdź dane ponownie dla aktualnego wyboru.'); fill(); showDataStatus(); setupAuto();
     resetArmed = false; $('pvReset').textContent = 'Wyczyść tylko kartę PV';
+    $('pvGridReport').textContent = 'Ustawienia zmieniły się — sprawdź zapis eLicznika ponownie dla aktualnego zakresu i źródła.';
+    if (pendingGrid) $('pvGridPreview').textContent = 'CSV przygotowany, ale zakres formularza mógł się zmienić. Zapis dotyczy całego wybranego zestawu plików; kompletność zakresu sprawdzisz po zapisie.';
     try { await store.saveSettings(settings); $('pvSaveStatus').textContent = 'Ustawienia zapisane osobno (pv-sim-v1-settings).'; }
     catch (e) { $('pvSaveStatus').textContent = 'Błąd zapisu ustawień PV: ' + e.message + '. Bieżące pola są tylko w pamięci; nie pokazujemy ich jako zapisane.'; }
   });
+  $('pvGridFile').addEventListener('change', previewGridFiles);
+  $('pvGridImport').addEventListener('click', importGrid);
+  $('pvGridCheck').addEventListener('click', showGridReport);
   $('pvFetch').addEventListener('click', fetchData);
   $('pvDiagnose').addEventListener('click', diagnose);
   $('pvCalculate').addEventListener('click', calculate);
@@ -355,6 +471,8 @@
             settings.entities.bmsDischarge = typeof c.bmsDischargeEntity === 'string' ? c.bmsDischargeEntity : ''; }
         } catch (_) {}
       }
+      const cachedGrid = await store.loadGridDataset();
+      if (cachedGrid) gridDataset = D.validateGridDataset(cachedGrid);
       const cached = await store.loadDataset();
       if (cached) dataset = { signature: cached.signature, fetchedAt: cached.fetchedAt, series: D.mergeSeries(cached.parts) };
     } catch (e) { blocked = true; say('Nie udało się odczytać własnego zapisu PV: ' + e.message + '. Nie nadpisano historii. Możesz jawnie wyczyścić wyłącznie kartę PV.', true); }

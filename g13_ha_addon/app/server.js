@@ -311,6 +311,9 @@ app.get('/api/growatt/ha-stats.csv', async (req, res) => {
  *
  * Bez parametrów `entities` endpoint nie zgaduje — zwraca 400 z instrukcją.
  * -------------------------------------------------------------------- */
+// Osobny kontrakt jednostek PV — nie zmienia eksportów dotychczasowych kart.
+app.get('/api/pv/stats.csv', require('./lib/pv-ha').handler);
+
 app.get('/api/ha/stats.csv', async (req, res) => {
   const raw = typeof req.query.entities === 'string' ? req.query.entities : '';
   const entities = raw.split(',').map((s) => s.trim()).filter(Boolean);
@@ -379,7 +382,7 @@ app.get('/api/ha/stats.csv', async (req, res) => {
 // zmienia obliczeń/backendu HA; zapobiega mieszaninie starych i nowych modułów.
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ASSETS = ['validate.js', 'vendor/xlsx.full.min.js',
-  'pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css'];
+  'pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js'];
 const assetTags = Object.create(null);
 for (const file of ASSETS) {
   try {

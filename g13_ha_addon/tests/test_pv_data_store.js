@@ -34,7 +34,7 @@ function mockStorage(initial = {}) {
   await test('PD02 odpowiedź HTML 200 / pusty nagłówek / uszkodzona liczba odrzucone', () => {
     assert.throws(() => D.parseStatsCsv('<html>HA SPA</html>'), /eksport/);
     assert.throws(() => D.parseStatsCsv('statistic_id,start_utc,change\n'), /nagłówek/);
-    const text = F.csv(F.data().series); assert.throws(() => D.parseStatsCsv(text.replace(',,,,0,0\n', ',,,,banana,0\n')), /liczba/);
+    const text = F.csv(F.data().series); assert.throws(() => D.parseStatsCsv(text.replace(',,,,0,0,\n', ',,,,banana,0,\n')), /liczba/);
   });
   await test('PD03 duplikat UTC jednej encji to błąd, nie podwójna energia', () => {
     const a = F.csv(F.data().series).trim().split('\n'); a.push(a[1]); assert.throws(() => D.parseStatsCsv(a.join('\n')), /Duplikat/);
