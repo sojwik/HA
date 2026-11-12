@@ -9,7 +9,7 @@ function settings(patch) {
     pvToAcEta: 1, pvToBatteryEta: 1, batteryToAcEta: 1, acToBatteryEta: 1, storeChargeEta: 1, storeDischargeEta: 1,
     inverterAcKw: 20, addedInverterAcKw: 20, exportAcKw: 20, unlimitedInverter: false,
     unlimitedAddedInverter: false, unlimitedExport: false, depositUseFraction: 1, loadScale: 1, costPln: null,
-    allowDstAggregation: false, acceptScenario: true, autoRefresh: false,
+    allowDstAggregation: false, acceptScenario: true, autoRefresh: false, gridSource: 'shared', gridPolicyVersion: 1,
     entities: { pv: 'sensor.test_pv', acOutput: 'sensor.test_ac', acCharge: 'sensor.test_ac_charge',
       bmsCharge: 'sensor.test_bms_charge', bmsDischarge: 'sensor.test_bms_discharge',
       soc: 'sensor.test_soc', pvPower: 'sensor.test_power', house: '' } }, patch);
@@ -39,8 +39,8 @@ function data(s = settings()) {
   for (let ts = span.start; ts < span.end; ts += HOUR) {
     const key = D.localKey(ts), hour = Number(key.slice(-2));
     if (!shared.hourlyElicznik[key]) shared.hourlyElicznik[key] = { date: key.slice(0, 10), hour,
-      poborPoZbil: 0, oddaniePoZbil: 0, hasImport: true, hasExport: true, strefa: 'T2' };
-    const g = shared.hourlyElicznik[key]; g.poborPoZbil += hour === 20 ? 3 : 0; g.oddaniePoZbil += hour === 12 ? 2 : 0;
+      poborPoZbil: 0, oddaniePoZbil: 0, hasImport: true, hasExport: true, strefa: 'T2', expectedCount: 0, importCount: 0, exportCount: 0 };
+    const g = shared.hourlyElicznik[key]; g.expectedCount++; g.importCount++; g.exportCount++; g.poborPoZbil += hour === 20 ? 3 : 0; g.oddaniePoZbil += hour === 12 ? 2 : 0;
     shared.rceHourly[key] = 400;
   }
   return { series: sumSeries(series), shared, settings: s, span };

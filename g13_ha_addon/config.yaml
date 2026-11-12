@@ -1,5 +1,5 @@
 name: "G13 Depozyt Prosumencki"
-version: "0.3.6"
+version: "0.3.7"
 slug: "g13_depozyt_calc"
 description: "Kalkulator depozytu prosumenckiego TAURON G13 z automatycznym pobieraniem danych Growatt z Home Assistant i walidacją fizyczną pomiarów."
 arch:

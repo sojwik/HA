@@ -1,6 +1,6 @@
-# Rozbudowa PV — kontrakt modelu scenariuszowego 0.3.6
+# Rozbudowa PV — kontrakt modelu scenariuszowego 0.3.7
 
-**Stan: przygotowanie wydania 0.3.6 do kontrolowanego sprawdzenia na PC.** Obejmuje poprawkę jednostek i osobny CSV eLicznika oraz prostszy formularz z prądami baterii w A DC. Bez publikacji i aktualizacji HA. Źródła/paczka 0.3.5 oraz poprzednia kopia robocza pozostają zachowane. Model nadal nie jest kalibracją pomiarów ani doborem urządzeń.
+**Stan: poprawka 0.3.7 tylko dla PV.** Automatyczny wybór istniejących źródeł eLicznika, zgodność ze współczesnym polem jednostki recorder HA i tabela składników ujemnego H. Stare rozliczenia, silnik energii, formularz A/sprawności, przestrzeń zapisu i oryginalne źródła 0.3.6 pozostają bez zmian. Testy wykonuje środowisko przygotowania paczki — procedura użytkownika na PC nie wymaga Node/npm ani lokalnych testów. Publikacja i aktualizacja HA są osobnymi, jawnymi czynnościami użytkownika; paczka nie steruje urządzeniami.
 
 ## Co liczy karta
 
@@ -68,7 +68,7 @@ Nie zapisujemy wyników symulacji do księgi. Po zmianie pól wynik jest uniewa�
 
 Pobieranie odbywa się przez **względny** `api/pv/stats.csv`, oddzielnie dla kolejnych miesięcy i własnej listy encji, z `change,sum,mean,min,max`. Zapytanie ma jawny godzinowy UTC i godzinę bufora przed początkiem. Nowy endpoint dopuszcza 1–40 różnych encji i najwyżej 62 dni na część. Nie zmienia `growatt_entities`, starego `api/ha/stats.csv`, `api/growatt/ha-stats.csv` ani automatyzacji urządzenia.
 
-Dla wybranej encji mocy odczytuje `recorder/get_statistics_metadata`, a następnie `recorder/statistics_during_period` z `units: {energy: "kWh", power: "kW"}`. Tylko znane W/kW o niesprzecznej klasie jednostki pozwala opisać moc jako kW w dodatkowej kolumnie `power_unit`. Brak/nieobsługiwane metadane pozostawiają jednostkę nieznaną; błąd zapytania o statystyki daje błąd pobrania, nie fallback do danych o zgadywanej jednostce.
+Dla wybranej encji mocy odczytuje `recorder/get_statistics_metadata`, a następnie `recorder/statistics_during_period` z `units: {energy: "kWh", power: "kW"}`. Odczytuje `statistics_unit_of_measurement` (HA 2026.10 i nowszy kontrakt) oraz starsze `unit_of_measurement`. `display_unit_of_measurement` nie jest dowodem jednostki statystyki. Gdy oba pola są obecne, muszą być obsługiwane i identyczne; null, sprzeczność, obca klasa, duplikat lub inny identyfikator nie są ignorowane. Tylko jawne W/kW o niesprzecznej klasie pozwalają opisać odpowiedź jako kW w kolumnie `power_unit`. Żądanie normalizacji wykonuje HA — odpowiedzi kW nie dzielimy drugi raz. Kontrakt sprawdzono w funkcji `_flatten_list_statistic_ids_metadata_result` pliku `homeassistant/components/recorder/statistics.py` tagu Core 2026.10.0; test emulatora uwzględnia rzeczywistą nazwę pola, a nie tylko historyczny wariant. Brak/nieobsługiwane metadane pozostawiają jednostkę nieznaną; błąd zapytania o statystyki daje błąd pobrania, nie fallback do danych o zgadywanej jednostce.
 
 Starszy cache/CSV bez `powerUnit` zachowuje energię i resztę R, ale nie służy porównaniu licznika z mocą. Widać ostrzeżenie i liczbę godzin bez jednostki; ponowne pobranie własnej historii PV może uzupełnić jawny kontrakt. Nie skalujemy liczników kWh ani nie rozpoznajemy W/kW po wielkości liczby. Zapisana jawna jednostka W jest przeliczana na kW tylko na potrzeby kontroli mocy; kW nie dzielimy drugi raz. Jednostka fizyczna/miejsce pomiaru nadal nie jest kalibracją sprzętu.
 
@@ -93,6 +93,8 @@ Dwa tryby zapotrzebowania:
 
 Obie metody mają jawne ograniczenia źródła/granic. W szczególności 1 nie jest niezależnym pomiarem. Ładowanie AC nie jest automatycznie fakturowanym zakupem baterii. Nie używamy `min(AC, import)`, nie odejmujemy AC od BMS DC. Ujemne H pozostaje w diagnozie, blokuje model i nie jest obcinane do zera.
 
+W 0.3.7 wszystkie ujemne przedziały mają od razu widoczną tabelę: początek lokalny, początek/koniec UTC, długość kroku, wyjście AC, import, eksport, ładowanie AC, wynik H i wybrane źródło eLicznika. Pokazujemy również identyfikatory encji i sumę samych ujemnych H, która NIE jest korektą bilansu. Rozróżnienie „eksport > wyjście + import” / „ładowanie AC > pozostała energia” to opis arytmetyczny, nie diagnoza uszkodzenia sensora. Zmiana limitów sprzętu, prądów lub sprawności scenariusza nie zmienia historii. Brak składnika pozostaje nieznany — nie tworzy pozornie kompletnego wiersza ujemnego H.
+
 `R = PV DC + BMS rozładowanie DC + ładowanie AC − BMS ładowanie DC − wyjście AC` jest **warunkową resztą historyczną**, a nie obliczoną sprawnością. Pokazujemy wszystkie rozbieżności, liczbę ujemnych godzin, liczbę poniżej −0,2 kWh (tolerancja 1e−7) i pokrycie. Ujemne R nie są dopasowywane, zerowane, przenoszone do sąsiednich godzin lub pomijane. Przy brakującym BMS reszta pełnego okresu jest nieznana.
 
 SOC mean/min/max służą wyłącznie ostrzeżeniom. Nie nadpisują energii modelu. Moc PV służy kontroli rozbieżności/zastojów, nie podmienia licznika.
@@ -102,19 +104,30 @@ SOC mean/min/max służą wyłącznie ostrzeżeniom. Nie nadpisują energii mode
 - Wewnątrz używamy chronologicznych godzin UTC. Daty formularza obejmują całe lokalne dni, oba włącznie.
 - Dzień wiosenny ma 23 godziny, jesienny 25; nie wstawiamy sztucznej godziny wiosną.
 - Legacy cache eLicznika i RCE ma lokalne klucze bez rozróżnienia dwóch jesiennych 02:00. Nie wymyślamy przypisania jego wierszy do foldów.
-- Wyjątkowo używamy **jednego kroku 2 h** z sumą obu godzin HA i zapisanym lokalnym agregatem eLicznika, wyłącznie po zaznaczeniu akceptacji przybliżenia. Moce i przepływy wewnątrz kroku są uśrednione. Cache nie zachowuje liczby źródłowych wierszy eLicznika, więc nie dowodzi kompletności obu foldów.
+- Wyjątkowo używamy **jednego kroku 2 h** z sumą obu godzin HA i potwierdzonym agregatem eLicznika, wyłącznie po osobnym zaznaczeniu akceptacji przybliżenia. W 0.3.7 same flagi cache nie wystarczają dla jesiennej powtórzonej godziny: potrzebne są dwa rekordy każdego kierunku (`expectedCount/importCount/exportCount = 2`), np. z już zapisanego sprawdzonego CSV PV. Tryb auto wybiera ten CSV dla wspólnego kroku. Główny importer nie został zmieniony i nie zapisuje liczności foldów. Bez dowodu pozostaje luka, nie „potwierdzony krok 2 h”. Moce wewnątrz kroku są nadal uśrednione.
 - RCE wspólnego kroku jest **nieznane**, nawet jeśli w starym cache istnieje jedna cena. Nie stosujemy jej do dwóch nierozróżnionych przepływów. G13 korzysta z zapisanej strefy.
 - Wymagamy nieujemnych obu kierunków eLicznika z jawnymi `hasImport/hasExport`. Starszy cache bez flag nie daje dowodu kompletności. Oryginalne pliki można potwierdzić w NOWYM, osobnym importerze wewnątrz PV. Nie używamy do tej naprawy importera Depozytu/Magazynu; nie dopisujemy flag do starych rekordów.
 
-### Obsługa bez konsoli — osobny eLicznik
+### Automatyczny wybór zapisanych źródeł — bez podwójnego importu
 
-1. Rozwiń „eLicznik dla PV — diagnostyka i osobny CSV”. „Sprawdź zapis eLicznika — tylko odczyt” pokazuje liczbę rekordów, braków flag i nieprawidłowych liczb dla dat formularza. Nie potrzebuje pobranej historii HA, nie zapisuje niczego i nie uruchamia modelu. Liczniki powodów mogą się pokrywać. Liczbę wyjątków AC/zerowy import odnosimy wyłącznie do kompletnych przedziałów sieciowych.
-2. Wybierz razem oryginalne CSV nowego zestawu (maks. 48 plików / 16 MB). Wspierany format jest jawny: średnik, `Data;Strefa;Wartość;Rodzaj;Status`, data ISO i etykieta KOŃCA godziny 1–24, pobrana/oddana **po zbilansowaniu [kWh]**, status `licznik`. Puste, ujemne i nieprawidłowe liczby, duplikaty, sprzeczne strefy, inne jednostki/formaty/statusy są odrzucane. Nie ignorujemy podejrzanych wierszy.
-3. Sam wybór plików to podgląd, bez zapisu. Nieistniejąca godzina wiosenna jest błędem pliku; brakującej godziny nie tworzymy. Dwa jesienne rekordy każdego kierunku są sumowane do jawnego przedziału 2 h, bez przypisania do foldów. Pojedynczy rekord nie potwierdza pełnych 2 h. Zgoda DST pozostaje wymagana w modelu; RCE wspólnego przedziału nieznane.
-4. „Zapisz i użyj CSV tylko w PV” zapisuje własny zestaw części + manifest i wybiera go jako źródło PV. **Zastępuje cały poprzedni osobny zestaw**, nie sumuje go i nie scala braków ze starą kartą. Ponowny import tych samych plików nie dubluje energii. Niepełny zestaw można zachować z jawnymi brakami, ale braków nie uznajemy za zera i nie uruchamiamy na nich warunkowego H.
-5. G13/RCE nadal pochodzą z zamrożonej kopii wspólnych cen. Brak strefy lub ceny daje nieznaną wycenę. Różnice skończonych liczb energii lub niepustych stref pomiędzy CSV i dotychczasowym zapisem są ujawniane oraz blokują model do wyjaśnienia. Nie uzgadniamy ich przez nadpisanie żadnej historii.
-6. Można jawnie przełączyć źródło z powrotem na dotychczasowe dane (tylko odczyt). Osobny CSV zostaje zachowany, ale nie jest wtedy używany. Wybrany zakres może pozostać zablokowany przez brak starych flag.
-7. Nowe części zapisują się przed manifestem; awaria nie aktywuje połowy zestawu. Zapis CSV i wybór źródła są dwoma operacjami KV: gdy zapis wyboru nie powiedzie się po commicie CSV, interfejs ostrzega, aby po ponownym otwarciu sprawdzić źródło. Nie udaje atomowości dwóch kluczy. Dwuklik resetu usuwa tylko obie historie i ustawienia PV, nie wspólne dane.
+Domyślny tryb **„Automatycznie — dane dodatku + zapisany CSV PV”** używa świeżej kopii wspólnych danych przy sprawdzeniu i obliczeniu. Przy wejściu do karty oraz zmianie formularza automatycznie pokazuje pokrycie; to odczyt pamięci, nie żądanie do Taurona, zapis do legacy lub nowe pobranie HA.
+
+1. Dla każdego przedziału wybiera **cały rekord** o pełnych obu kierunkach, poprawnych nieujemnych liczbach i potwierdzonych wymaganiach DST. Nigdy nie miesza poboru z jednego źródła z eksportem drugiego i nie sumuje dwóch kopii tej samej godziny.
+2. Pierwszeństwo ma kompletny rekord z głównej karty. Jeśli w nim brakuje strefy, a kompletny CSV zawiera strefę, wybierany jest cały rekord CSV. Następnie CSV uzupełnia godziny bez dowodu kompletności w starym cache. Oba źródła pozostają nietknięte.
+3. Jeżeli żadne źródło nie potwierdza godziny, pozostaje brak. Nie dopisujemy starych flag ani zer. Liczby miesięczne nie zastępują godzin. Dla starego okresu bez zachowanego dowodu nadal może być potrzebny **jednorazowy** oryginalny CSV; automatyka nie odzyskuje informacji, której nie zapisano.
+4. Skończone różniące się energie lub różne niepuste strefy w dwóch źródłach blokują tryb auto, również gdy jeden zapis jest stary/bez flag. Pokrycie i wszystkie różnice są dostępne w zwykłym UI. Nie wybieramy „wygodniejszej” wartości, nie korygujemy historii. Różnice poza wybranym zakresem nie blokują tego zakresu.
+5. Wcześniej zapisane CSV PV i historia HA są odczytywane z tego samego `pv-sim-v1-`; nie wymagają ponownego importu. Stare ustawienia 0.3.6 bez `gridPolicyVersion` przechodzą w formularzu na auto z widocznym komunikatem i wyłączoną starą akceptacją scenariusza. Sam start nie zapisuje migracji: najbliższa zmiana pola (np. ponowna akceptacja) zapisuje nowy wybór tylko w PV. A/V, sprawności, limity, daty i encje pozostają zachowane. Nowy, jawnie zapisany tryb ręczny z `gridPolicyVersion: 1` nie jest ponownie zmieniany na auto.
+6. Kompletne nowe importy w głównej karcie są dostępne w PV przy następnym odczycie — nie wgrywamy tego samego pliku drugi raz do PV. Istniejący główny importer nie został zmieniony. Jest to **wybór już zapisanych źródeł, nie integracja ani automatyczny download z Taurona**.
+7. Tryby zaawansowane „Tylko dotychczasowe dane” i „Tylko osobny CSV” nadal pozwalają jawnie przypiąć źródło. Tryb CSV nie uzupełnia luk z głównej karty, a tryb shared świadomie nie korzysta ani nie porównuje z archiwum CSV. Tryb auto porównuje oba. Uszkodzony zapis CSV nie jest ukrywany przejściem na drugie źródło.
+
+### Jednorazowe potwierdzanie starego archiwum CSV — tylko w PV
+
+- „Sprawdź zapis eLicznika — tylko odczyt” nie wymaga historii HA ani konsoli. Podaje pokrycie i osobno liczniki flag, liczb i brakującego dowodu obu jesiennych rekordów. Liczniki przyczyn mogą się nakładać.
+- Zapisany wcześniej zestaw **zostaje**. Import jest potrzebny wyłącznie wtedy, gdy brakuje potwierdzenia starego okresu. Jeżeli wymieniasz własne archiwum, wybierz razem wszystkie CSV, które mają zostać zachowane: maks. 48 plików / 16 MB. Nowy zestaw zastępuje poprzedni CSV PV; nie scala jego energii ani nie zmienia oryginalnych plików. Nowe kompletne okresy z głównej karty nie muszą być w tym archiwum.
+- Oryginalny format: średnik, `Data;Strefa;Wartość;Rodzaj;Status`, data ISO, etykieta końca godziny 1–24, oba kierunki **po zbilansowaniu [kWh]**, status `licznik`. Niedozwolone liczby, statusy, jednostki, duplikaty, nieistniejące godziny i sprzeczne strefy są odrzucane. Pojedynczy rekord powtórzonej godziny nie dowodzi pełnych 2 h; obu foldów i ich RCE nie odgadujemy.
+- Wybór plików daje tylko podgląd. **„Zapisz CSV i używaj automatycznie tylko w PV”** zapisuje osobne części + manifest i włącza auto. Nie importuje do Depozytu/Magazynu ani nie zmienia salda. Ponowny zapis tego samego zestawu nie dubluje energii.
+- Manifest CSV i wybór źródła są dwoma zapisami. Błąd drugiego zapisu jest widoczny; nie udajemy atomowości dwóch kluczy. Części zapisują się przed manifestem; awaria nie aktywuje połowy zestawu. G13 i RCE nadal pochodzą z kopii wspólnych cen. Brak strefy/ceny nie staje się 0 zł.
+- Reset nadal wymaga dwóch kliknięć i usuwa tylko obie historie i ustawienia PV. **Aktualizacja 0.3.7 nie wymaga resetu.**
 
 ## Model energii i granice sprawności
 
@@ -170,23 +183,25 @@ Puste limity są nieznane i blokują obliczenie; wpisane 0 A baterii / 0 kW eksp
 
 ## Testy i uruchomienie
 
-W `app/`: najpierw `npm ci`, a następnie `npm test`. Nowe testy dołączone są do istniejącego runnera. Nie wymagają dodatkowych zależności. Testy syntetyczne nie wymagają CSV użytkownika. Historyczne zestawy używają istniejącego mechanizmu `G13_TEST_CSV`; brak pliku jest jawnie oznaczany jako pominięcie, nie sukces.
+**Procedura użytkownika na PC: Git + PowerShell, bez Node/npm i lokalnych testów.** Instalator sprawdza hashe paczki, dokładny commit bazy 0.3.6 i czystość repo. DryRun poprzedza zastosowanie. Wysłanie gałęzi wymaga osobnego wpisania `TAK`; PR/scalenie i HA są osobnymi czynnościami użytkownika. Nie trzeba wklejać wyników do rozmowy. Nie uruchamiać instalatora w terminalu dodatku HA.
+
+Dla utrzymujących kod, w osobnym środowisku deweloperskim: w `app/` `npm ci`, potem `npm test`; `G13_TEST_CSV` wskazuje prywatny eksport tylko na czas testu. Brak realnego pliku jest jawnie oznaczany jako pominięcie, nie zaliczony test. Zależności pozostają bez zmiany.
 
 - 303 dotychczasowe testy + istniejący przebieg walidatora na realnym eksporcie;
-- 41 nowych testów modelu (w tym 400 losowych par 48-godzinnych przebiegów i kontrole zera);
-- 39 danych/czasu/zapisu;
-- 31 nowych testów CSV, flag, jednostek i osobnych zapisów;
-- 13 nowych testów prawdziwej ścieżki Express → klient WebSocket → lokalny emulator protokołu recorder (bez podmiany funkcji pobierającej);
-- 45 DOM, obejmujących bajtową zgodność starych kluczy i treści tabel po podglądzie, imporcie, przełączeniu źródła, restartach, błędach i resecie PV;
-- 13 HTTP/zasobów/KV;
-- 20 testów przeliczenia A/V, wariantu strat, zachowania własnych ustawień i bilansu;
-- łącznie 505 nazwanych testów plus istniejący przebieg walidatora na realnym eksporcie. Osobny audyt 0.3.6 wykrył 22/22 celowo wprowadzonych błędów w kopiach tymczasowych: 10 dotyczących jednostek/CSV/zapisów oraz 12 dotyczących A/V, przywracania parametrów i sprawności. Historyczne 16/16 mutacji dotyczyło akceptacji 0.3.5, nie pokrycia tych zmian.
+- 41 testów modelu, w tym losowe bilanse i zerowy przyrost;
+- 39 danych/czasu/zapisu oraz 31 parsera CSV/jednostek/izolacji;
+- 31 automatycznego wyboru źródeł, migracji, DST, konfliktów i składników ujemnego H;
+- 27 prawdziwej ścieżki Express → WebSocket → emulator recorder, obejmujących współczesne `statistics_unit_of_measurement`, stare pole, różne jednostki wyświetlania, sprzeczności/null/obcą klasę i błędy. Bez podmiany funkcji pobierającej;
+- 55 testów DOM, w tym migracja 0.3.6 bez ponownego importu, odczyt nowego importu z głównej karty, pełna tabela ujemnych godzin, restart, błędy i brak zapisów do cudzych kluczy;
+- 20 A/V i własnych sprawności oraz 13 HTTP/zasobów/KV;
+- **łącznie 560 nazwanych testów**, w akceptacji środowiska przygotowania 0 błędów / 0 pominięć. Testy nie oznaczają odczytu rzeczywistego HA lub walidacji elektrycznej;
+- audyt mutacji 0.3.7 wykrył **36/36** celowo wprowadzonych błędów wyłącznie w kopiach tymczasowych: 22 dotychczasowe reguły (dostosowane do nowego kodu) i 14 nowych kontraktów metadanych, wyboru źródeł, migracji i tabeli H.
 
-Wektorów mocy/sprawności i encji `sensor.test_*` z testów **nie wolno uznać za ustawienia urządzenia**. Testy potwierdzają działanie kodu, nie kalibrację hardware'u.
+Wektory testowe `sensor.test_*` są sztuczne, a prywatnych eksportów nie ma w payloadzie. Pomyślny test joinu czy bilansu arytmetycznego nie usuwa niespójnych pomiarów, nie dobiera sprzętu i nie daje prognozy oszczędności.
 
 ## Historia wydania 0.3.5 — nie instrukcja wdrażania tej kopii roboczej
 
-Poniższe kroki opisują poprzednie wydanie. Zostało już zastosowane na PC, opublikowane i scalone przez PR #15. Nie należy go ponownie instalować ani używać jego buildera do tej zmienionej kopii. 0.3.6 ma osobny builder/manifest/instalator. Wykonanie na PC, publikacja i wdrożenie pozostają oddzielnymi etapami.
+Poniższe kroki opisują poprzednie wydanie. Zostało już zastosowane na PC, opublikowane i scalone przez PR #15. Nie należy go ponownie instalować ani używać jego buildera do tej zmienionej kopii. Nowsze wydania mają osobne buildery/manifesty/instalatory; bieżąca procedura 0.3.7 jest opisana wyżej. Wykonanie na PC, publikacja i wdrożenie pozostają oddzielnymi etapami.
 
 
 Potwierdzono bazę na komputerze: czysta `fix/g13-034`, oba numery 0.3.4,

@@ -279,13 +279,13 @@ async function calc(d) {
     assert.strictEqual(gx.calls.length, n); assert.strictEqual(gx.kv[S.prefix + 'grid-active'], undefined); isolated(gx, gb);
   });
   await test('UI29 jawny zapis CSV usuwa blokadę tylko w PV, pozostawia flagi/saldo/magazyny', async () => {
-    await importGrid(gx); assert.ok(gx.kv[S.prefix + 'grid-active']); assert.strictEqual(gx.window.document.getElementById('pv-gridSource').value, 'csv');
+    await importGrid(gx); assert.ok(gx.kv[S.prefix + 'grid-active']); assert.strictEqual(gx.window.document.getElementById('pv-gridSource').value, 'auto');
     assert.ok(txt(gx, 'pvGridReport').includes('24/24 kompletnych')); assert.ok(txt(gx, 'pvGridReport').includes('bez flag poboru/oddania: 24/24'));
     await calc(gx); assert.strictEqual(txt(gx, 'pvBenefit'), '1,50 zł'); isolated(gx, gb);
   });
   await test('UI30 restart przywraca osobny CSV i wybór źródła, bez pobrania HA', async () => {
     const r = await open(oldFlags, gx.kv), b = baseline(r); await calc(r);
-    assert.strictEqual(txt(r, 'pvBenefit'), '1,50 zł'); assert.strictEqual(r.window.document.getElementById('pv-gridSource').value, 'csv');
+    assert.strictEqual(txt(r, 'pvBenefit'), '1,50 zł'); assert.strictEqual(r.window.document.getElementById('pv-gridSource').value, 'auto');
     assert.ok(!r.calls.some(c => c.path.endsWith('/api/pv/stats.csv'))); isolated(r, b); assert.deepStrictEqual(legacyKv(r.kv), gb.kv); r.window.close();
   });
   await test('UI31 błędny CSV nie nadpisuje poprzedniej historii PV/HA ani legacy', async () => {
@@ -301,7 +301,7 @@ async function calc(d) {
   });
   await test('UI33 ponowny import bez podwojenia oraz przełączenie na shared znów pokazuje blokadę', async () => {
     await importGrid(gx); await calc(gx); assert.strictEqual(txt(gx, 'pvBenefit'), '1,50 zł'); isolated(gx, gb);
-    await set(gx, 'pv-gridSource', 'shared'); assert.ok(txt(gx, 'pvGridReport').includes('sprawdź zapis'));
+    await set(gx, 'pv-gridSource', 'shared'); assert.ok(txt(gx, 'pvGridReport').includes('Źródło używane w PV: dane dodatku'));
     await calc(gx); assert.ok(txt(gx, 'pvStatus').includes('24 problemów blokujących')); isolated(gx, gb);
     await set(gx, 'pv-gridSource', 'csv'); await calc(gx); assert.strictEqual(txt(gx, 'pvBenefit'), '1,50 zł');
   });
@@ -389,6 +389,134 @@ async function calc(d) {
   await test('UI45 nieprawidłowe napięcie nie tworzy zerowego/darmowego limitu', async () => {
     await set(simple,'pv-batteryVoltageV','0'); await calc(simple); assert.ok(txt(simple,'pvStatus').includes('napięcie odniesienia'));
     assert.strictEqual(simple.window.document.getElementById('pvResults').hidden,true); isolated(simple,simpleBefore);
+  });
+
+
+  async function withGrid(kv, data) {
+    await S.create({ async get(k) { return kv[k] === undefined ? null : { value: kv[k] }; },
+      async set(k, v) { kv[k] = v; }, async delete(k) { delete kv[k]; },
+      async list(pre) { return { keys: Object.keys(kv).filter(k => k.startsWith(pre)) }; } }).saveGridDataset(data);
+    return kv;
+  }
+  await test('UI46 migracja 0.3.6 CSV → auto bez reimportu, zmiany danych lub zapisów przy starcie', async () => {
+    const sf = F.data(); sf.settings.gridSource = 'csv'; delete sf.settings.gridPolicyVersion;
+    sf.settings.chargeCurrentA = 100; sf.settings.dischargeCurrentA = 80; sf.settings.batteryVoltageV = 50;
+    sf.settings.pvToAcEta = .9412345678;
+    const csv = D.parseGridCsvFiles([{ name: 'synthetic-old.csv', text: F.gridCsv(sf.shared.hourlyElicznik) }]);
+    for (const r of Object.values(sf.shared.hourlyElicznik)) { delete r.hasImport; delete r.hasExport; }
+    const kv = await withGrid(await seed(sf), csv), x = await open(sf, kv), b = baseline(x);
+    assert.strictEqual(x.window.document.getElementById('pv-gridSource').value, 'auto');
+    assert.strictEqual(x.window.document.getElementById('pv-acceptScenario').checked, false);
+    assert.ok(txt(x, 'pvGridMigration').includes('Nie trzeba ponownie importować'));
+    assert.strictEqual(x.window.document.getElementById('pv-chargeCurrentA').value, '100');
+    assert.strictEqual(x.window.document.getElementById('pv-batteryVoltageV').value, '50');
+    assert.ok(txt(x, 'pvGridAutoStatus').includes('z zapisanego CSV PV: 24'));
+    assert.deepStrictEqual(x.kv, kv); assert.ok(x.calls.every(c => c.method === 'GET'));
+    await set(x, 'pv-acceptScenario', true); await calc(x);
+    assert.strictEqual(x.window.document.getElementById('pvResults').hidden, false);
+    const saved = JSON.parse(x.kv[S.prefix + 'settings']).settings;
+    assert.strictEqual(saved.gridPolicyVersion, 1); assert.strictEqual(saved.gridSource, 'auto');
+    assert.strictEqual(saved.pvToAcEta, .9412345678); assert.strictEqual(x.kv[S.prefix + 'grid-active'], kv[S.prefix + 'grid-active']);
+    assert.ok(!x.calls.some(c => c.path.endsWith('/api/pv/stats.csv')));
+    const restart = await open(sf, x.kv); assert.strictEqual(txt(restart, 'pvGridMigration'), '');
+    assert.strictEqual(restart.window.document.getElementById('pv-gridSource').value, 'auto');
+    assert.ok(restart.calls.every(c => c.method === 'GET')); isolated(x, b); restart.window.close(); x.window.close();
+  });
+  await test('UI47 mieszany zakres bierze po 12 pełnych rekordów z dwóch zapisów bez sumowania', async () => {
+    const sf = F.data(); sf.settings.gridSource = 'auto';
+    const csv = D.parseGridCsvFiles([{ name: 'synthetic-part.csv', text: F.gridCsv(sf.shared.hourlyElicznik) }]); csv.rows = csv.rows.slice(0, 12);
+    for (let h = 0; h < 12; h++) delete sf.shared.hourlyElicznik['2026-09-01_' + String(h).padStart(2, '0')].hasImport;
+    const x = await open(sf, await withGrid(await seed(sf), csv)), b = baseline(x); await calc(x);
+    assert.strictEqual(txt(x, 'pvBenefit'), '1,50 zł');
+    assert.ok(txt(x, 'pvGridAutoStatus').includes('Z danych dodatku: 12; z zapisanego CSV PV: 12; niepotwierdzone: 0'));
+    assert.ok(x.calls.every(c => c.method === 'GET')); isolated(x, b); x.window.close();
+  });
+  await test('UI48 nowy import W GŁÓWNEJ karcie widoczny w auto PV bez drugiego wgrywania', async () => {
+    const sf = F.data(); sf.settings.gridSource = 'auto';
+    const text = F.gridCsv(sf.shared.hourlyElicznik), csv = D.parseGridCsvFiles([{ name: 'synthetic-old.csv', text }]);
+    for (const r of Object.values(sf.shared.hourlyElicznik)) { delete r.hasImport; delete r.hasExport; }
+    const x = await open(sf, await withGrid(await seed(sf), csv)); const gridActive = x.kv[S.prefix + 'grid-active'];
+    assert.ok(txt(x, 'pvGridAutoStatus').includes('z zapisanego CSV PV: 24'));
+    const mainInput = x.window.document.getElementById('fileElicznik');
+    Object.defineProperty(mainInput, 'files', { configurable: true, value: [{ name: 'synthetic-new-main.csv', size: text.length, async text() { return text; } }] });
+    mainInput.dispatchEvent(new x.window.Event('change', { bubbles: true }));
+    await until(() => x.calls.some(c => c.method === 'PUT' && c.key === 'elicznik-hourly-2026-09'), 'główny import');
+    await new Promise(r => setTimeout(r, 25));
+    const afterIntentionalMainImport = baseline(x);
+    x.window.document.querySelector('[data-tab="pv"]').click(); await calc(x);
+    assert.ok(txt(x, 'pvGridAutoStatus').includes('Z danych dodatku: 24; z zapisanego CSV PV: 0'));
+    assert.strictEqual(txt(x, 'pvBenefit'), '1,50 zł'); assert.strictEqual(x.kv[S.prefix + 'grid-active'], gridActive);
+    assert.ok(!x.calls.some(c => c.path.endsWith('/api/pv/stats.csv')));
+    isolated(x, afterIntentionalMainImport); x.window.close();
+  });
+  await test('UI49 sześć ujemnych godzin: widoczna tabela składników/UTC, zero wyniku bez clamp', async () => {
+    const sf = F.data(); sf.settings.gridSource = 'auto'; sf.settings.inverterAcKw = 12; sf.settings.exportAcKw = 12;
+    for (let h = 0; h < 6; h++) sf.shared.hourlyElicznik['2026-09-01_0' + h].oddaniePoZbil = 2 + h / 10;
+    const x = await open(sf), b = baseline(x); await calc(x);
+    assert.strictEqual(x.window.document.getElementById('pvResults').hidden, true);
+    assert.ok(txt(x, 'pvStatus').includes('6 problemów blokujących'));
+    assert.strictEqual(x.window.document.querySelectorAll('#pvHouseBreakdown tbody tr').length, 6);
+    const details = txt(x, 'pvHouseBreakdown'); assert.ok(details.includes('-2,000000') && details.includes('-13,500000'));
+    assert.ok(details.includes('2026-08-31T22:00:00.000Z') && details.includes('sensor.test_ac_charge'));
+    await set(x, 'pv-chargeCurrentA', '0'); await set(x, 'pv-exportAcKw', '0'); await calc(x);
+    assert.strictEqual(txt(x, 'pvHouseBreakdown'), details); isolated(x, b); x.window.close();
+  });
+  await test('UI50 auto ujawnia składniki konfliktów dwóch źródeł, nie uruchamia modelu', async () => {
+    const sf = F.data(); sf.settings.gridSource = 'auto';
+    const csv = D.parseGridCsvFiles([{ name: 'synthetic.csv', text: F.gridCsv(sf.shared.hourlyElicznik) }]);
+    csv.rows[0].poborPoZbil = 1; csv.rows[1].oddaniePoZbil = 2;
+    const x = await open(sf, await withGrid(await seed(sf), csv)), b = baseline(x); await calc(x);
+    assert.ok(txt(x, 'pvGridAutoStatus').includes('konflikty: 2'));
+    assert.strictEqual(x.window.document.querySelectorAll('#pvGridReport tbody tr').length, 2);
+    assert.ok(txt(x, 'pvGridReport').includes('1,000000')); assert.strictEqual(x.window.document.getElementById('pvResults').hidden, true);
+    isolated(x, b); x.window.close();
+  });
+  await test('UI51 nieznana wersja wyboru źródła nie jest po cichu migrowana ani nadpisana', async () => {
+    const sf = F.data(); sf.settings.gridPolicyVersion = 99; const kv = await seed(sf), x = await open(sf, kv), b = baseline(x);
+    assert.ok(txt(x, 'pvStatus').includes('Nieznana wersja wyboru źródeł'));
+    assert.strictEqual(x.window.document.getElementById('pvCalculate').disabled, true); assert.deepStrictEqual(x.kv, kv);
+    isolated(x, b); x.window.close();
+  });
+  await test('UI52 jawnie zapisany nowy ręczny CSV/shared nie zmienia się przy restarcie', async () => {
+    for (const source of ['csv', 'shared']) {
+      const sf = F.data(); sf.settings.gridSource = source;
+      const csv = D.parseGridCsvFiles([{ name: 'synthetic.csv', text: F.gridCsv(sf.shared.hourlyElicznik) }]);
+      const x = await open(sf, await withGrid(await seed(sf), csv)), b = baseline(x);
+      assert.strictEqual(x.window.document.getElementById('pv-gridSource').value, source); assert.strictEqual(txt(x, 'pvGridMigration'), '');
+      await calc(x); assert.strictEqual(txt(x, 'pvBenefit'), '1,50 zł'); isolated(x, b); x.window.close();
+    }
+  });
+  await test('UI53 stare jednostki nie są poprawiane w cache; jedno nowe pobranie przyjmuje jawne kW', async () => {
+    const sf = F.data(); sf.settings.gridSource = 'auto';
+    for (const r of sf.series[sf.settings.entities.pvPower]) delete r.powerUnit;
+    const kv = await seed(sf);
+    for (const r of sf.series[sf.settings.entities.pvPower]) r.powerUnit = 'kW';
+    const x = await open(sf, kv), b = baseline(x); await calc(x);
+    assert.ok(txt(x, 'pvDiagnostics').includes('bez potwierdzonej jednostki: 24 h'));
+    assert.ok(x.calls.every(c => c.method === 'GET'));
+    x.window.document.getElementById('pvFetch').click();
+    await until(() => !x.window.document.getElementById('pvFetch').disabled && txt(x, 'pvStatus').includes('Zapisano wyłącznie'));
+    assert.ok(txt(x, 'pvDiagnostics').includes('Moc PV ze znaną jednostką: 24/24 h'));
+    assert.strictEqual(x.calls.filter(c => c.path.endsWith('/api/pv/stats.csv')).length, 1); isolated(x, b); x.window.close();
+  });
+  await test('UI54 jesień: auto pokazuje 1 krok z potwierdzonego CSV i nadal wymaga zgody', async () => {
+    const sf = F.data(F.settings({ startDate: '2026-10-25', endDate: '2026-10-25', gridSource: 'auto' }));
+    const csv = D.parseGridCsvFiles([{ name: 'synthetic-fall.csv', text: F.gridCsv(sf.shared.hourlyElicznik) }]);
+    const fold = sf.shared.hourlyElicznik['2026-10-25_02']; delete fold.importCount; delete fold.exportCount; delete fold.expectedCount;
+    const x = await open(sf, await withGrid(await seed(sf), csv)), b = baseline(x); await calc(x);
+    assert.strictEqual(x.window.document.getElementById('pvResults').hidden, true);
+    assert.ok(txt(x, 'pvGridAutoStatus').includes('Z danych dodatku: 23; z zapisanego CSV PV: 1'));
+    assert.ok(txt(x, 'pvGridReport').includes('niepotwierdzona kompletność kroku 2 h: 1'));
+    await set(x, 'pv-allowDstAggregation', true); await calc(x);
+    assert.strictEqual(x.window.document.getElementById('pvResults').hidden, false); isolated(x, b); x.window.close();
+  });
+  await test('UI55 brak dowodu nie jest ukrytą zgodą na stare liczby w auto', async () => {
+    const sf = F.data(); sf.settings.gridSource = 'auto';
+    for (const r of Object.values(sf.shared.hourlyElicznik)) { delete r.hasImport; delete r.hasExport; }
+    const x = await open(sf), b = baseline(x); await calc(x);
+    assert.ok(txt(x, 'pvGridReport').includes('jednorazowego potwierdzenia'));
+    assert.ok(txt(x, 'pvStatus').includes('24 problemów blokujących')); assert.ok(x.calls.every(c => c.method === 'GET'));
+    isolated(x, b); x.window.close();
   });
 
   for (const x of instances) x.window.close();
