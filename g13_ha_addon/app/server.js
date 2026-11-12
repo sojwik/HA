@@ -382,7 +382,7 @@ app.get('/api/ha/stats.csv', async (req, res) => {
 // zmienia obliczeń/backendu HA; zapobiega mieszaninie starych i nowych modułów.
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ASSETS = ['validate.js', 'vendor/xlsx.full.min.js',
-  'pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js'];
+  'pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js', 'pv-export.js'];
 const assetTags = Object.create(null);
 for (const file of ASSETS) {
   try {

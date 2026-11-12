@@ -1,3 +1,94 @@
+# Rozbudowa PV 0.3.8 — dwa jawnie oddzielone sposoby liczenia
+
+## Nowy prosty tryb: dodatkowa produkcja PV wyceniona jako eksport
+
+Ten tryb NIE rekonstruuje domu, baterii ani instalacji fizycznie pozbawionej magazynu. Odpowiada na pytanie: **ile wynosi wartość przyrostu produkcji nowych paneli, jeśli cały dostępny przyrost po przyjętych stratach/ograniczeniach potraktujemy jako eksport?** Rzeczywista autokonsumpcja, bateria, sterowanie i ograniczenia chwilowe mogą dać inne przepływy. Wynik jest scenariuszem, nie pomiarem, gwarancją oddania ani wypłatą gotówki.
+
+Dotychczasowe rozliczenia i zaawansowany model z dynamiczną baterią pozostają niezależne. Nie zmieniono `pv-model.js`, `pv-data.js`, `pv-form.js`, funkcji RCE, logiki depozytu/magazynów ani backendu recorder. W `index.html` doszedł wyłącznie lokalny moduł; w serwerze jego tag treści/cache. Nowe testy i UI nie zapisują legacy KV.
+
+### Wymagane dane i ponowne użycie historii
+
+- PV DC: przyrost `change` w kWh oraz bufor poprzedniej godziny. Wymagany pełny ciągły zakres UTC; luki, ujemne przyrosty i niezgodność z Δsum są błędami, nie zerami. Nie używamy wyjścia AC zawierającego rozładowanie baterii zamiast PV DC.
+- Moc PV jest opcjonalną diagnostyką. Jednostka W/kW musi być jawna, zgodnie z istniejącym kontraktem HA; brak jednostki wyłącza porównanie, nie zmienia kWh. Nie zastępujemy licznika średnią mocą i nie przesuwamy energii między godzinami. Niespójności profilu mogą wpływać na godzinowe RCE także po rezygnacji z H.
+- Potwierdzony historyczny **eksport** eLicznika jest potrzebny do kontroli wolnego miejsca w zadanym limicie całego układu. Import i taryfa G13 nie są wejściami tego trybu. Gdy użytkownik jawnie przyjmie brak limitu eksportu, można wycenić sam przyrost bez eLicznika, ale punkt odniesienia pozostaje **nieznany**, nie 0.
+- Auto wybiera cały rekord z potwierdzonym eksportem: dane dodatku, a następnie sprawdzony zapis CSV PV. Nie sumuje źródeł, nie dopisuje flag i nie łączy fragmentów pomiaru. Sprzeczny eksport w dwóch źródłach blokuje. Etykiety licznika 1–24 są nadal końcami przedziałów; parser bez zmian.
+- W tym trybie diagnostyka źródeł wyraźnie potwierdza tylko eksport. W starym modelu warunkowego H nadal wymagane są oba kierunki i obowiązują wszystkie stare konflikty/kontrole.
+- Powtórzona godzina jesienna pozostaje dwoma UTC, wspólny krok 2 h wymaga zgody. Potwierdzenie eksportu wymaga obu rekordów eksportu; nie zgadujemy podziału ceny/energii na foldy. Dodatnia energia bez jednoznacznego RCE daje nieznaną pełną kwotę.
+- Nowy tryb może użyć podzakresu istniejącej własnej historii, jeżeli sygnatura obejmuje daty i wskazany licznik PV. Kompletność i bufor sprawdzane są mimo zgodności metadanych. Tydzień nie zastępuje miesiąca. Wybieramy cały najnowszy pasujący zapis, nie składamy godzin z kilku historii.
+- Minimalne pobranie żąda wyłącznie PV DC i opcjonalnej mocy. Zapis `pv-sim-v1-export-active` i `pv-sim-v1-export-data-*` jest oddzielony od starego pełnego `pv-sim-v1-active`/`data-*`. Atomowy commit manifestu, zakres kluczy i limit części 1,8 MB pozostają kontrolowane. Nowy fetch bez kompletnego wymaganego profilu/bufora nie zastępuje poprzedniego zapisu; HTTP 200 z samą mocą nie oznacza sukcesu PV.
+- Zapisany CSV eLicznika jest używany ponownie. Nowy tryb nie wymaga ponownego importu tego samego pliku. Nie jest automatycznym pobieraniem danych z Taurona.
+
+### Rachunek energii i ograniczeń
+
+Dla kroku o długości `dt` godzin:
+
+```
+P = historyczny przyrost PV DC
+N = P × dodatkowe_kWp / obecne_kWp × względny_uzysk
+η = osobna sprawność PV DC → AC tego trybu
+```
+
+**Wspólny falownik DC:**
+
+```
+A = min((P + N) × η, limit_hybrydy × dt)
+  − min(P × η, limit_hybrydy × dt)
+```
+
+To różnica dwóch krzywych konwersji **samego PV**, nie pomiar wolnego budżetu hybrydy. Nie znamy zajęcia falownika przez istniejącą baterię, ograniczeń MPPT i skutków zmiany sterowania. Profil jest już po historycznych ograniczeniach; nie odzyskujemy produkcji, której licznik nie zarejestrował.
+
+**Dodatkowy falownik AC:**
+
+```
+A = min(N × η, limit_nowego_falownika × dt)
+```
+
+Istniejąca hybryda i jej prądy baterii nie są tu wymaganymi parametrami. Nie zakładamy sterowania ładowaniem z dodatkowego AC.
+
+**Przyrost eksportu:**
+
+```
+W = max(0, limit_eksportu × dt − historyczny_eksport_eLicznika)
+X = min(A, W)
+```
+
+Brak limitu wymaga osobnego jawnego wyboru — puste pole nie jest Infinity. Eksport historyczny większy od założonego limitu daje ostrzeżenie i 0 miejsca na przyrost. Nie obcinamy historii; ustawienie 0 blokuje X, a nie zamienia wcześniejszy eksport na zero. Czasowe średnie nie gwarantują limitów chwilowych.
+
+Rozdzielamy nowy profil DC, dodatkowe AC po ograniczeniu falownika, przyrost eksportu, modelową stratę konwersji wyeksportowanej energii i ekwiwalenty DC niewykorzystane wskutek limitu falownika/eksportu. Rachunek kontrolny:
+
+```
+N = X + strata_konwersji + niewykorzystane_DC_falownika + niewykorzystane_DC_eksportu
+```
+
+Są to wielkości scenariusza, nie zmierzone straty/curtailment. Dom i bateria nie są ukrytymi zerowymi przepływami — **nie są modelowane**. Cały dostępny przyrost jest z założenia wyceniany jako eksport, także jeśli rzeczywista instalacja zużyłaby część inaczej.
+
+### Wycena, formularz i zachowanie wcześniejszych ustawień
+
+- Jedna osobna sprawność `exportPvToAcEta`. Przy pierwszym przejściu przenoszona jest wartość PV → AC starego zestawu, również jej precyzja lub jawny brak. Nowy niezapisany formularz proponuje orientacyjne 95%, nie pomiar. Zmiana tej sprawności nie zmienia sześciu sprawności starego modelu.
+- Nie potrzeba A/V, pojemności, SOC, H, ładowania AC, BMS ani stawek G13. Pola te są ukryte i nieaktywne, ale ich wartości zostają zachowane dla starego trybu.
+- Nowy, niezapisany formularz proponuje tryb `export_only`. Istniejący zapis bez pola `calculationMode` wraca do `dynamic_battery` — bez cichej zmiany znaczenia i zapisu przy starcie. Użytkownik wybiera prosty tryb raz; zmiana trybu oraz założeń eksportu unieważnia wynik i zgodę scenariusza.
+- Wyceniany jest tylko X, przez niezmienioną funkcję `pv-model.sellPrice`: godzinowe `max(0,RCE)/1000`, współczynnik 1,23 od lutego 2025. Nowy moduł nie interpretuje na nowo zasad istniejących rozliczeń.
+- Wartość warunkowa = wybrany stopień wykorzystania × przyrost przypisu depozytu. Nie wyliczamy oszczędności zakupu G13, wartości starej instalacji, zwrotu rocznego, gotówki ani końcowej energii baterii. Brak ceny przy dodatnim X nie jest zerem; znane podsumy i zakres braków są osobne.
+- Koszt rozbudowy to informacja scenariusza, nie wyliczona rekomendacja zakupu. Limity nie są odczytem sprzętu/OSD; wybór podłączenia nie jest projektem elektrycznym.
+
+### Pliki i weryfikacja 0.3.8
+
+`app/public/pv-export.js` to czysty moduł nowego przygotowania danych, źródeł eksportu, zgodności cache i wyceny; bez DOM/KV/sieci. `pv-tab.js` przełącza interfejs, a `pv-store.js` dodaje wyłącznie osobną kolekcję historii. Dotychczasowy silnik, przygotowanie H i przeliczenia A/V zachowano bajtowo. Zależności nie zmieniły się.
+
+Weryfikacja w środowisku przygotowania obejmuje wszystkie wcześniejsze testy, nowe testy silnika/danych/cache, zapis, DOM i prawdziwy HTTP/KV. Są też warianty losowe bilansu/ograniczeń, testy mutacyjne oraz prywatna kontrola na zachowanych danych — prywatne dane i wyniki nie są częścią repozytorium. Żaden z tych testów nie oznacza wykonania na komputerze/HA użytkownika ani fizycznej walidacji.
+
+### Instalacja/obsługa
+
+Procedura użytkownika: **Git + PowerShell, bez Node/npm i testów PC, bez wklejania logów i konsoli przeglądarki**. Paczka sprawdza dokładną bazę 0.3.7, pełny payload, czystość repo i zakres commita. Pytania uruchamiane są w bieżącym procesie PowerShell, a bezinteraktywny instalator wykonuje DryRun, potem zastosowanie tylko po sukcesie. Nie usuwa starszych klonów ani nie cofa zmian. Opcjonalne wysłanie gałęzi wymaga osobnego dokładnego `TAK`; PR/scalenie i aktualizacja HA są osobnymi decyzjami.
+
+Po aktualizacji: wybierz prosty tryb, właściwe daty i jawne założenia, zaakceptuj scenariusz i oblicz. Jeśli zgodna historia już obejmuje okres, nie pobieraj jej ponownie tylko z powodu zmiany trybu. Gdy zapis obejmuje wyłącznie tydzień, a wybierasz miesiąc, pobierz jeden nowy minimalny zakres HA. CSV już zapisany w PV nie wymaga ponownego importu. Nie czyść karty ani nie odinstalowuj dodatku.
+
+---
+
+# Zachowany kontrakt wcześniejszego modelu z dynamiczną baterią (0.3.7)
+
+Poniższa dokumentacja opisuje odrębny zaawansowany tryb i historię poprzednich wydań. Jego H, diagnostyka, A/V i pełna symulacja nie zostały uproszczone ani uznane za naprawione przez nowy tryb eksportu. Historyczne instrukcje/testy poniżej nie zastępują procedury 0.3.8 powyżej.
+
 # Rozbudowa PV — kontrakt modelu scenariuszowego 0.3.7
 
 **Stan: poprawka 0.3.7 tylko dla PV.** Automatyczny wybór istniejących źródeł eLicznika, zgodność ze współczesnym polem jednostki recorder HA i tabela składników ujemnego H. Stare rozliczenia, silnik energii, formularz A/sprawności, przestrzeń zapisu i oryginalne źródła 0.3.6 pozostają bez zmian. Testy wykonuje środowisko przygotowania paczki — procedura użytkownika na PC nie wymaga Node/npm ani lokalnych testów. Publikacja i aktualizacja HA są osobnymi, jawnymi czynnościami użytkownika; paczka nie steruje urządzeniami.
