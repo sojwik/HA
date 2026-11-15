@@ -377,12 +377,15 @@ app.get('/api/ha/stats.csv', async (req, res) => {
   }
 });
 
+/* AMIplus: osobny odczyt statystyk i atomowe uzupełnianie nowych godzin. */
+require('./lib/ami-ha').register(app);
+
 /* ---------- statyczny frontend ---------- */
 // F38 + PV: osobny tag treści każdego lokalnego zasobu. Dodanie PV nie
 // zmienia obliczeń/backendu HA; zapobiega mieszaninie starych i nowych modułów.
 const PUBLIC_DIR = path.join(__dirname, 'public');
 const ASSETS = ['validate.js', 'vendor/xlsx.full.min.js',
-  'pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js', 'pv-export.js', 'pv-annual.js', 'pv-available.js'];
+  'pv-model.js', 'pv-data.js', 'pv-store.js', 'pv-tab.js', 'pv-tab.css', 'pv-form.js', 'pv-export.js', 'pv-annual.js', 'pv-available.js', 'ami-model.js', 'ami-ui.js'];
 const assetTags = Object.create(null);
 for (const file of ASSETS) {
   try {
