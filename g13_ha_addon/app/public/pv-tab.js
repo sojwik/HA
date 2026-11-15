@@ -65,6 +65,7 @@
   let settings = defaults(), dataset = null, exportDataset = null, result = null, prepared = null, gridDataset = null, pendingGrid = null;
   let store, busy = false, blocked = false, ready = false, resetArmed = false, autoTimer = null, gridMigrationNotice = '', modeMigrationNotice = '';
   let availableDataset = null, availableCacheError = '';
+  let pendingSettingsWrites = 0; // wyłącznie blokada równoległego importu AMI
   let settingsReadable = false, annualReference = null, annualReferenceEpoch = 0, annualReferenceBusy = false, pendingAnnualPriceOrigin = null;
   const $ = id => document.getElementById(id);
   const number = (x, digits = 2) => typeof x === 'number' && Number.isFinite(x)
@@ -86,6 +87,12 @@
   root.innerHTML = `
     <header class="pv-heading"><div><span class="eyebrow">Osobny kalkulator · 0.4.0</span><h2>Rozbudowa PV</h2></div><span class="pv-badge">Symulacja scenariusza</span></header>
     <div id="pvModeNotice" class="pv-notice"><strong>Nie jest to zwalidowana rekonstrukcja pomiarów.</strong> Porównujemy dwa modele: obecne PV i PV po rozbudowie — z dynamiczną obecną baterią, bez planowego ładowania z sieci. Dane historyczne i ich rozbieżności pokazujemy osobno. Nic nie trafia do salda depozytu, autokonsumpcji ani kalkulatora drugiego magazynu.</div>
+    <section id="pvAmiSection" class="panel pv-section" aria-labelledby="pvAmiHeading">
+      <h3 id="pvAmiHeading">Pobór i oddanie z AMIplus</h3>
+      <p class="pv-muted">Ten sam import co w „1 · Dane z eLicznika”: uzupełnia wspólny zapis godzin i pochodne rejestry głównej karty, nie tworzy drugiej kopii. To pobór/oddanie sieciowe, NIE produkcja PV — ją nadal pobieraj dotychczasowym przyciskiem danych PV.</p>
+      <p id="pvAmiSourceNotice" class="pv-muted">Zakres pobrania AMI jest osobny od okresu obliczeń PV; koniec to D−1. Aby używać tych godzin w PV, wybierz źródło eLicznika „Automatycznie” lub „Tylko dotychczasowe dane”. Wybór „Tylko osobny CSV” nie jest przełączany. Ceny RCE pobierz osobno w Depozycie.</p>
+      <div id="pvAmiMount"></div>
+    </section>
     <form id="pvForm" novalidate>
       <div class="pv-field pv-mode-selector"><label for="pv-calculationMode">Sposób liczenia korzyści z rozbudowy</label><select id="pv-calculationMode"><option value="available_home_export">Dostępne godziny + roczny ROI — zużycie → eksport, bez symulacji baterii</option><option value="annual_estimate">Szacunek roczny + ROI — bez kompletnej historii HA</option><option value="export_only">Prosty: dodatkowa produkcja PV wyceniona jako eksport</option><option value="dynamic_battery">Zaawansowany: dwa modele z dynamiczną obecną baterią</option></select><p id="pvModeHint" class="pv-muted"></p><p id="pvModeMigration" class="pv-muted"></p></div>
       <section id="pvDataSection" class="panel pv-section"><div class="panel-header-row"><h3>1 · Dane i okres</h3><span class="pv-muted">Daty włącznie · Europe/Warsaw</span></div>
@@ -187,7 +194,8 @@
     return n;
   }
   function updateFields() {
-    root.querySelectorAll('input,select,button').forEach(n => { n.disabled = busy || !ready || (formBlocked() && n.id !== 'pvReset' && !(n.id === 'pv-calculationMode' && settingsReadable)); });
+    if (amiImportRunning()) return; // nie odblokowuj kontrolek w trakcie wspólnego importu
+    $('pvForm').querySelectorAll('input,select,button').forEach(n => { n.disabled = busy || !ready || (formBlocked() && n.id !== 'pvReset' && !(n.id === 'pv-calculationMode' && settingsReadable)); });
     if (!busy && ready && !formBlocked()) {
       const ac = settings.topology === 'ac_added';
       $('pv-addedInverterAcKw').disabled = !ac || settings.unlimitedAddedInverter;
@@ -964,8 +972,33 @@
     if (autoTimer) clearInterval(autoTimer);
     autoTimer = settings.autoRefresh && !annualMode() && !availableMode() ? setInterval(() => { if (!root.hidden) fetchData(); }, 3600000) : null;
   }
+  /* AMI_PV_BRIDGE_BEGIN — tylko dostęp do wspólnego importu i odświeżenie widoku.
+   * Obliczenia, wybór źródła, ustawienia i magazyny PV nie są zapisywane przez AMI. */
+  function amiImportRunning(){return !!(window.G13AmiBridge && window.G13AmiBridge.isBusy && window.G13AmiBridge.isBusy());}
+  function amiGuard(fn){return function(){if(amiImportRunning())return;return fn.apply(this,arguments);};}
+  fetchData=amiGuard(fetchData);diagnose=amiGuard(diagnose);calculate=amiGuard(calculate);
+  previewGridFiles=amiGuard(previewGridFiles);importGrid=amiGuard(importGrid);reset=amiGuard(reset);
+  showAnnualReference=amiGuard(showAnnualReference);adoptAnnualReference=amiGuard(adoptAnnualReference);
+  Object.defineProperty(window,'G13PvAmiView',{configurable:false,writable:false,value:Object.freeze({
+    canImport:()=>ready && !busy && !annualReferenceBusy && pendingSettingsWrites===0,
+    restoreControls:()=>updateFields(),
+    imported:()=>{
+      clearAnnualReference();
+      if(!annualMode()){
+        invalidate();invalidateDiagnostics('AMIplus uzupełnił wspólny eLicznik. Sprawdź okres i oblicz ponownie na aktualnych godzinach. Produkcja PV i jej zapis pozostają bez zmian.');
+        say(settings.gridSource==='csv'
+          ? 'AMIplus uzupełnił wspólny zapis. Wybór „Tylko osobny CSV” pozostaje; nowe dane mogą ujawnić różnice z CSV. Poprzedni wynik unieważniono — sprawdź dane i oblicz ponownie, bez nadpisania archiwum.'
+          : 'Zapisano nowe godziny poboru/oddania we wspólnym eLiczniku. Poprzedni wynik godzinowy unieważniono; oblicz ponownie. Ustawienia, historie PV i ceny pozostają bez zmian.');
+      } else {
+        say('AMIplus uzupełnił wspólny zapis. Roczny szacunek z ręcznych założeń pozostaje bez zmian; opcjonalne odniesienie można sprawdzić ponownie.');
+      }
+      showGridReport(); // świeża kopia wspólnych godzin, bez kolejnego odczytu HA lub zapisu
+    }
+  })});
+  /* AMI_PV_BRIDGE_END */
   $('pvForm').addEventListener('submit', e => e.preventDefault());
   $('pvForm').addEventListener('change', async e => {
+    if (amiImportRunning()) return;
     if (!ready || busy || (formBlocked() && !(e.target.id === 'pv-calculationMode' && settingsReadable))) return;
     const next = readForm(e.target.id);
     if (e.target.id === 'pv-calculationMode' || (['export_only', A.mode, R.mode].includes(modeOf(next)) && e.target.id !== 'pv-acceptScenario')) next.acceptScenario = false;
@@ -984,8 +1017,10 @@
     resetArmed = false; $('pvReset').textContent = 'Wyczyść tylko kartę PV';
     showGridReport(); // świeża kopia źródeł, bez pobierania HA i bez zapisu legacy
     if (pendingGrid) $('pvGridPreview').textContent = 'CSV przygotowany, ale zakres formularza mógł się zmienić. Zapis dotyczy całego wybranego zestawu plików; kompletność zakresu sprawdzisz po zapisie.';
+    pendingSettingsWrites++;
     try { await store.saveSettings(settings); $('pvSaveStatus').textContent = 'Ustawienia zapisane osobno (pv-sim-v1-settings).'; }
     catch (e) { $('pvSaveStatus').textContent = 'Błąd zapisu ustawień PV: ' + e.message + '. Bieżące pola są tylko w pamięci; nie pokazujemy ich jako zapisane.'; }
+    finally { pendingSettingsWrites--; }
   });
   $('pvAnnualReference').addEventListener('click', showAnnualReference);
   $('pvAnnualUseReference').addEventListener('click', adoptAnnualReference);

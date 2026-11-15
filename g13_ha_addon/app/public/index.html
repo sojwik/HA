@@ -215,7 +215,8 @@
         <span>Wybierz plik(i) albo przeciągnij tutaj</span>
       </label>
       <div class="status" id="elicznikStatus"></div>
-      <div style="margin-top:1rem;border-top:1px solid var(--border);padding-top:1rem">
+      <div id="amiHome">
+      <div id="amiPanel" style="margin-top:1rem;border-top:1px solid var(--border);padding-top:1rem">
         <button type="button" id="btnAmiFetch" class="btn-primary">Pobierz dane z AMIplus</button>
         <button type="button" id="btnAmiCancel" class="btn-secondary" hidden disabled>Anuluj pobieranie</button>
         <p class="hint">Na żądanie z istniejącej integracji HA, do D−1. Uzupełnia tylko nowe godziny; nie nadpisuje CSV ani rozbieżności. Bez harmonogramu i bez logowania do Taurona. Ceny RCE pobierz osobno.</p>
@@ -227,6 +228,7 @@
         </div>
         <p id="amiStatus" class="status" role="status" aria-live="polite"></p>
         <details><summary>Szczegóły ostatniego pobrania AMIplus</summary><ul id="amiDetails"></ul></details>
+      </div>
       </div>
     </div>
 
@@ -2995,7 +2997,10 @@ Object.defineProperty(window,'G13AmiBridge',{configurable:false,writable:false,v
   whenReady:pvReady,
   getSnapshot:function(){return JSON.parse(JSON.stringify(state));},
   guard:function(){return JSON.stringify(state);},
+  isBusy:function(){return amiBusy;},
   begin:function(){
+    if(window.G13PvAmiView && !window.G13PvAmiView.canImport())
+      throw new Error('Poczekaj na zakończenie bieżącego odczytu lub zapisu karty PV. Nie uruchomiono importu AMIplus.');
     if(amiBusy||amiLegacyTasks||haSyncInFlight||document.getElementById('btnFetchApi').disabled)
       throw new Error('Poczekaj na zakończenie bieżącego odczytu lub zapisu dodatku.');
     amiBusy=true;amiDisabled=[];
@@ -3004,7 +3009,10 @@ Object.defineProperty(window,'G13AmiBridge',{configurable:false,writable:false,v
     });
     return JSON.stringify(state);
   },
-  end:function(){for(const pair of amiDisabled)pair[0].disabled=pair[1];amiDisabled=[];amiBusy=false;},
+  end:function(){
+    for(const pair of amiDisabled)pair[0].disabled=pair[1];amiDisabled=[];amiBusy=false;
+    if(window.G13PvAmiView)window.G13PvAmiView.restoreControls();
+  },
   apply:function(result,guard){
     if(JSON.stringify(state)!==guard)throw new Error('Zapis AMI zakończony, ale widok zmienił się. Odśwież stronę dodatku.');
     if(!result||!result.hourly||!result.months||!Array.isArray(result.added))throw new Error('Nieprawidłowe potwierdzenie zapisu AMI. Odśwież widok.');
@@ -3014,6 +3022,7 @@ Object.defineProperty(window,'G13AmiBridge',{configurable:false,writable:false,v
     state.hourlyElicznik=result.hourly;state.months=result.months;
     updateElicznikStatus();render();
     log('AMIplus: dodano '+result.added.length+' godzin. Istniejące godziny i koszty zachowane. Brakujące RCE pobierz osobno.','success');
+    if(result.added.length && window.G13PvAmiView)window.G13PvAmiView.imported();
   }
 })});
 /* AMI_BRIDGE_END */
