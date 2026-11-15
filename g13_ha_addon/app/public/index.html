@@ -215,6 +215,19 @@
         <span>Wybierz plik(i) albo przeciągnij tutaj</span>
       </label>
       <div class="status" id="elicznikStatus"></div>
+      <div style="margin-top:1rem;border-top:1px solid var(--border);padding-top:1rem">
+        <button type="button" id="btnAmiFetch" class="btn-primary">Pobierz dane z AMIplus</button>
+        <button type="button" id="btnAmiCancel" class="btn-secondary" hidden disabled>Anuluj pobieranie</button>
+        <p class="hint">Na żądanie z istniejącej integracji HA, do D−1. Uzupełnia tylko nowe godziny; nie nadpisuje CSV ani rozbieżności. Bez harmonogramu i bez logowania do Taurona. Ceny RCE pobierz osobno.</p>
+        <div id="amiSettings" hidden>
+          <label>Licznik AMIplus <select id="amiMeter"><option value="">Najpierw wykryj przyciskiem powyżej</option></select></label>
+          <label style="display:block;margin-top:.5rem">Od <input type="date" id="amiFrom"></label>
+          <p class="hint">Domyślnie 7 dni obejmujących ostatnią zapisaną datę oraz nowe dni; przy pustej historii ostatnie 31 dni. Możesz wybrać wcześniejszy początek (maks. 366 dni na pobranie). Do: <span id="amiThrough"></span>.</p>
+          <label><input type="checkbox" id="amiConfirm"> Potwierdzam, że wybrany licznik dotyczy tych danych eLicznika (przy pierwszym zapisie).</label>
+        </div>
+        <p id="amiStatus" class="status" role="status" aria-live="polite"></p>
+        <details><summary>Szczegóły ostatniego pobrania AMIplus</summary><ul id="amiDetails"></ul></details>
+      </div>
     </div>
 
     <div class="panel">
@@ -2969,6 +2982,52 @@ async function loadState(){
 }
 
 /* ============================== EVENTS ============================== */
+/* AMI_BRIDGE_BEGIN — tylko nowy import; wzory i parser CSV pozostają nietknięte. */
+let amiBusy=false, amiLegacyTasks=0, amiDisabled=[];
+function amiWrapTask(fn){
+  return async function(){
+    if(amiBusy){ log('Trwa pobieranie AMIplus — zakończ je lub anuluj przed innym importem.', 'warn'); return; }
+    amiLegacyTasks++;
+    try{ return await fn.apply(this,arguments); }finally{ amiLegacyTasks--; }
+  };
+}
+Object.defineProperty(window,'G13AmiBridge',{configurable:false,writable:false,value:Object.freeze({
+  whenReady:pvReady,
+  getSnapshot:function(){return JSON.parse(JSON.stringify(state));},
+  guard:function(){return JSON.stringify(state);},
+  begin:function(){
+    if(amiBusy||amiLegacyTasks||haSyncInFlight||document.getElementById('btnFetchApi').disabled)
+      throw new Error('Poczekaj na zakończenie bieżącego odczytu lub zapisu dodatku.');
+    amiBusy=true;amiDisabled=[];
+    document.querySelectorAll('.app input,.app select,.app textarea,.app button').forEach(function(el){
+      if(el.id==='btnAmiCancel')return;amiDisabled.push([el,el.disabled]);el.disabled=true;
+    });
+    return JSON.stringify(state);
+  },
+  end:function(){for(const pair of amiDisabled)pair[0].disabled=pair[1];amiDisabled=[];amiBusy=false;},
+  apply:function(result,guard){
+    if(JSON.stringify(state)!==guard)throw new Error('Zapis AMI zakończony, ale widok zmienił się. Odśwież stronę dodatku.');
+    if(!result||!result.hourly||!result.months||!Array.isArray(result.added))throw new Error('Nieprawidłowe potwierdzenie zapisu AMI. Odśwież widok.');
+    const M=window.G13AmiModel;
+    for(const key of Object.keys(state.hourlyElicznik))if(M.stable(state.hourlyElicznik[key])!==M.stable(result.hourly[key]))throw new Error('Potwierdzenie AMI zmienia stare godziny. Odśwież widok.');
+    for(const key of result.added)M.validateRow(Object.assign({key:key},result.hourly[key]));
+    state.hourlyElicznik=result.hourly;state.months=result.months;
+    updateElicznikStatus();render();
+    log('AMIplus: dodano '+result.added.length+' godzin. Istniejące godziny i koszty zachowane. Brakujące RCE pobierz osobno.','success');
+  }
+})});
+/* AMI_BRIDGE_END */
+
+/* AMI: blokada konkurencyjnych importów, bez zmiany ich algorytmów. */
+handleElicznikFiles=amiWrapTask(handleElicznikFiles);
+handleRceFiles=amiWrapTask(handleRceFiles);
+handleGrowattFiles=amiWrapTask(handleGrowattFiles);
+handleHaStatsFiles=amiWrapTask(handleHaStatsFiles);
+fetchRceFromApi=amiWrapTask(fetchRceFromApi);
+saveState=amiWrapTask(saveState);
+saveElicznikHourly=amiWrapTask(saveElicznikHourly);
+saveHaHourly=amiWrapTask(saveHaHourly);
+
 function setupDropzone(labelEl, handler){
   ['dragover','dragenter'].forEach(function(evt){
     labelEl.addEventListener(evt, function(e){ e.preventDefault(); labelEl.classList.add('drag-over'); });
@@ -3092,6 +3151,7 @@ async function loadAddonConfig(){
 }
 
 async function autoSyncGrowattFromHA(){
+  if(amiBusy) return; // odczyt AMI nie może wyścigać się z zapisem Growatt
   // S3: bez tej flagi kliknięcie „Synchronizuj” w trakcie trwania synchronizacji
   // uruchamiało drugą, a obie dodawały te same dane → podwójne wartości.
   // Timer z setupGrowattAutoRefresh() mógł nałożyć się na ręczne kliknięcie.
@@ -3265,10 +3325,12 @@ loadState().then(function(){
 <script src="pv-form.js"></script>
 <script src="pv-model.js"></script>
 <script src="pv-data.js"></script>
+<script src="ami-model.js"></script>
 <script src="pv-export.js"></script>
 <script src="pv-annual.js"></script>
 <script src="pv-available.js"></script>
 <script src="pv-store.js"></script>
 <script src="pv-tab.js"></script>
+<script src="ami-ui.js"></script>
 </body>
 </html>
