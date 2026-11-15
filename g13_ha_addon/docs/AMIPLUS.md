@@ -1,4 +1,4 @@
-# AMIplus — przycisk w sekcji eLicznika (0.4.1)
+# AMIplus — wspólny przycisk eLicznika i Rozbudowy PV (0.4.2)
 
 ## Co robi przycisk
 
@@ -47,3 +47,15 @@ To kontrakt wspieranego importera, nie dowód wersji lub kompletności instalacj
 Nie zmieniono modeli PV/baterii, ich założeń, ograniczeń ani starych parserów i endpointów HA. Nowe godziny głównego eLicznika stają się dostępne przez istniejące źródło współdzielone PV, ale nie zmieniają jego ustawień czy zapisanych historii. Ostrzeżenia godzinowego profilu Growatt pozostają odłożone zgodnie z decyzją użytkownika.
 
 Sprawdzenie na emulatorze recorder i zachowanych CSV nie jest niezależnym odczytem działającego HA użytkownika ani potwierdzeniem poprawności rozliczeń operatora. Dane licznika i jego identyfikatory pozostają w prywatnym HA/dodatku. Nie dodawać katalogów `uploads/` i prywatnych audytów do repozytorium/paczki publicznej.
+
+## Dostęp także z Rozbudowy PV (0.4.2)
+
+W zakładce **Rozbudowa PV → Pobór i oddanie z AMIplus** znajduje się ten sam formularz co w głównym eLiczniku. Przełączanie zakładek przenosi istniejące kontrolki, nie tworzy kopii historii lub drugiego handlera i nie wywołuje AMI. Wybór licznika, potwierdzenie, data i komunikat pozostają te same. Formularz AMI jest poza formularzem scenariusza; zmiana daty/wyboru AMI nie zapisuje ustawień PV.
+
+Import jest świadomym zapisem do **wspólnego głównego eLicznika**, wraz z jego pochodnymi miesięcznymi, tak samo jak w0.4.1. Nie jest nowym prywatnym cache PV i nie zmienia wzorów rozliczeń. Sama symulacja nadal pozostaje tylko odczytem tych danych. Ceny RCE są osobno, a produkcja PV DC nadal pochodzi z wcześniejszego źródła HA/Growatt — AMI nie dostarcza całej produkcji instalacji.
+
+Zakres AMI nie zmienia dat obliczeń PV. Po nowym imporcie aktualizowany jest podgląd pokrycia eLicznika; wynik godzinowy jest unieważniany, aby nie pokazywać starego wyniku jako aktualnego. Dotyczy to także wyboru samego CSV, bo nowe wspólne godziny mogą ujawnić istniejący w modelach konflikt źródeł. Kliknij ponownie obliczenie. Nie ma automatycznej zmiany parametrów lub zgody scenariusza, przeliczenia modeli ani pobierania produkcji PV.
+
+Wybór **„Tylko osobny CSV”** pozostaje świadomie zachowany: zapis AMI nie zastępuje tego CSV ani nie przełącza źródła. Aby używać wspólnych godzin, wybierz „Automatycznie” lub „Tylko dotychczasowe dane”. Ręczny estymator roczny zachowuje swój wynik i założenia; czyści się tylko opcjonalne odniesienie do zmienionej historii.
+
+Operacje PV i AMI mają wspólną blokadę w czasie importu. Rozpoczęty odczyt/zapis/reset PV lub oczekujący zapis jego ustawień wstrzymuje uruchomienie AMI; w czasie AMI nie startuje timer pobierania PV. Po anulowaniu/błędzie kontrolki wracają do stanu właściwego dla wybranego trybu. Nie dodano harmonogramu AMI ani nie zmieniono istniejącego wyboru automatycznego odświeżania PV.

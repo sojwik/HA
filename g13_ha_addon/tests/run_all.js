@@ -4,6 +4,7 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 
 const SUITES = [
+  ['AMIplus — wspólny przycisk w karcie Rozbudowa PV', 'test_ami_pv_dom.js'],
   ['AMIplus — dane, strefy, DST i atomowy zapis', 'test_ami_core.js'],
   ['AMIplus — protokół HA, HTTP i pełny przycisk w DOM', 'test_ami_http_dom.js'],
   ['Walidator na realnych danych', 'test_validate_real.js'],

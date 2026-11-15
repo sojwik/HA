@@ -75,5 +75,13 @@
   }
   cancel.addEventListener('click',()=>{if(controller&&!cancel.disabled)controller.abort();});
   button.addEventListener('click',run);
+  // Jeden formularz, jeden wybór licznika i jeden handler — bez kopii importu.
+  // Przenosimy istniejący DOM, nie klonujemy kontrolek ani nie pobieramy na wejściu.
+  const panel=$('amiPanel'),home=$('amiHome'),pv=$('pvAmiMount');
+  if(panel&&home&&pv){
+    const place=()=>{const destination=$('tab-pv').hidden?home:pv;if(panel.parentElement!==destination)destination.append(panel);};
+    document.querySelectorAll('.tab-btn').forEach(tab=>tab.addEventListener('click',place));
+    place();
+  }
   B.whenReady.then(()=>{const end=M.yesterday();from.value=M.defaultFrom(B.getSnapshot().hourlyElicznik,end);$('amiThrough').textContent=end+' (wczoraj, Europe/Warsaw)';});
 })();
