@@ -16,6 +16,7 @@
 
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const express = require('express');
 const kv = require('./lib/kv');
 const haWs = require('./lib/ha-ws');
@@ -128,16 +129,10 @@ function monthsAgo(n) {
 const app = express();
 app.disable('x-powered-by');
 
-/* ---------- nagłówki bezpieczeństwa (T19) ---------- */
-app.use((req, res, next) => {
-  res.set('X-Content-Type-Options', 'nosniff');
-  res.set('X-Frame-Options', 'SAMEORIGIN');
-  res.set('Referrer-Policy', 'no-referrer');
-  // Ingress HA osadza dodatek w iframe, więc frame-ancestors musi pozwalać
-  // na rodzica. Reszta CSP blokuje zewnętrzne skrypty (SheetJS jest lokalny).
-  res.set('Content-Security-Policy', [
+function buildCsp(scriptNonce) {
+  return [
     "default-src 'self'",
-    "script-src 'self' 'unsafe-inline'",
+    scriptNonce ? ("script-src 'self' 'nonce-" + scriptNonce + "'") : "script-src 'self'",
     "style-src 'self' 'unsafe-inline'",
     "img-src 'self' data:",
     // Host musi się zgadzać z PSE_API_BASE w public/index.html. Wcześniej było
@@ -148,19 +143,44 @@ app.use((req, res, next) => {
     "frame-ancestors 'self' http://homeassistant.local:* https://*.ui.nabu.casa",
     "base-uri 'self'",
     "form-action 'self'",
-  ].join('; '));
+  ].join('; ');
+}
+
+function tokensMatch(got, expected) {
+  if (typeof got !== 'string' || typeof expected !== 'string' || !got || !expected) return false;
+  const h1 = crypto.createHash('sha256').update(got, 'utf8').digest();
+  const h2 = crypto.createHash('sha256').update(expected, 'utf8').digest();
+  return crypto.timingSafeEqual(h1, h2);
+}
+
+/* ---------- nagłówki bezpieczeństwa (T19 + 0.4.3 CSP nonce) ---------- */
+app.use((req, res, next) => {
+  res.set('X-Content-Type-Options', 'nosniff');
+  res.set('X-Frame-Options', 'SAMEORIGIN');
+  res.set('Referrer-Policy', 'no-referrer');
+  // Ingress HA osadza dodatek w iframe, więc frame-ancestors musi pozwalać
+  // na rodzica. Reszta CSP blokuje zewnętrzne skrypty (SheetJS jest lokalny)
+  // oraz usuwa 'unsafe-inline' z script-src (HTML otrzymuje losowy nonce).
+  res.set('Content-Security-Policy', buildCsp(null));
   next();
 });
 
 /* ---------- limit ciała (T20) ---------- */
 app.use(express.json({ limit: '2mb' }));
 
-/* ---------- autoryzacja (T18) ---------- */
+/* ---------- autoryzacja (T18 + 0.4.3 fail-closed & timingSafeEqual) ---------- */
 app.use((req, res, next) => {
-  if (!options.require_auth || !AUTH_TOKEN) return next();
+  if (!options.require_auth) return next();
   if (req.path === '/api/health') return next();   // potrzebne do healthcheck
+  if (!AUTH_TOKEN) {
+    res.status(503).json({
+      error: 'auth_misconfigured',
+      message: 'Wymagana autoryzacja (require_auth=true), ale nie ustawiono ADDON_TOKEN.',
+    });
+    return;
+  }
   const got = req.get('X-Addon-Token') || '';
-  if (got !== AUTH_TOKEN) {
+  if (!tokensMatch(got, AUTH_TOKEN)) {
     res.status(401).json({ error: 'unauthorized' });
     return;
   }
@@ -180,40 +200,66 @@ app.get('/api/health', (req, res) => {
 
 /* ---------- KV ---------- */
 app.get('/api/kv/:key', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!kv.isValidKey(req.params.key)) {
+    res.status(400).json({ error: 'Nieprawidłowa nazwa klucza KV.' });
+    return;
+  }
   try {
-    const value = kv.get(req.params.key);
-    if (value === undefined) { res.status(404).json({ error: 'not_found' }); return; }
-    res.json({ key: req.params.key, value });
+    const found = kv.getWithEtag(req.params.key);
+    res.set('ETag', found.etag);
+    if (found.value === undefined) { res.status(404).json({ error: 'not_found' }); return; }
+    res.json({ key: req.params.key, value: found.value });
   } catch (err) {
     console.error('[kv] GET:', err.message);
-    res.status(503).json({ error: err.message });
+    res.status(err.status || 503).json({ error: err.message });
   }
 });
 
 app.put('/api/kv/:key', (req, res) => {
-  if (typeof req.body.value !== 'string') {
+  res.set('Cache-Control', 'no-store');
+  if (!kv.isValidKey(req.params.key)) {
+    res.status(400).json({ error: 'Nieprawidłowa nazwa klucza KV.' });
+    return;
+  }
+  if (!req.body || typeof req.body.value !== 'string') {
     res.status(400).json({ error: 'Pole "value" musi być stringiem (frontend sam robi JSON.stringify).' });
     return;
   }
   try {
-    kv.set(req.params.key, req.body.value);
+    const expectedEtag = req.get('If-Match');
+    kv.set(req.params.key, req.body.value, expectedEtag ? { expectedEtag } : undefined);
+    res.set('ETag', kv.etagOf(req.body.value));
     res.json({ key: req.params.key, value: req.body.value });
   } catch (err) {
+    const status = err.status || 503;
+    if (status === 409) {
+      if (err.currentEtag) res.set('ETag', err.currentEtag);
+      res.status(409).json({ error: 'conflict', message: err.message });
+      return;
+    }
     console.error('[kv] PUT:', err.message);
-    res.status(503).json({ error: err.message });
+    res.status(status).json({ error: err.message });
   }
 });
 
 app.delete('/api/kv/:key', (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (!kv.isValidKey(req.params.key)) {
+    res.status(400).json({ error: 'Nieprawidłowa nazwa klucza KV.' });
+    return;
+  }
   try {
     kv.del(req.params.key);
+    res.set('ETag', '"ABSENT"');
     res.json({ key: req.params.key, deleted: true });
   } catch (err) {
-    res.status(503).json({ error: err.message });
+    res.status(err.status || 503).json({ error: err.message });
   }
 });
 
 app.get('/api/kv', (req, res) => {
+  res.set('Cache-Control', 'no-store');
   try {
     res.json({ keys: kv.list(req.query.prefix || '') });
   } catch (err) {
@@ -389,15 +435,18 @@ const ASSETS = ['validate.js', 'vendor/xlsx.full.min.js',
 const assetTags = Object.create(null);
 for (const file of ASSETS) {
   try {
-    const hash = require('crypto').createHash('sha256').update(fs.readFileSync(path.join(PUBLIC_DIR, file))).digest('hex');
+    const hash = crypto.createHash('sha256').update(fs.readFileSync(path.join(PUBLIC_DIR, file))).digest('hex');
     assetTags[file] = String(parseInt(hash.slice(0, 12), 16));
   } catch (e) { /* brak zasobu zostaje widoczny jako 404; bez fałszywego tagu */ }
 }
 app.get(['/', '/index.html'], (req, res, next) => {
   fs.readFile(path.join(PUBLIC_DIR, 'index.html'), 'utf8', (err, html) => {
     if (err) return next(err);
+    const nonce = crypto.randomBytes(16).toString('base64');
     html = html.replace(/((?:src|href)=")([^"]+)(")/g,
       (m, a, file, c) => assetTags[file] ? a + file + '?v=' + assetTags[file] + c : m);
+    html = html.replace(/<script>/g, '<script nonce="' + nonce + '">');
+    res.set('Content-Security-Policy', buildCsp(nonce));
     res.set('Cache-Control', 'no-cache');
     res.type('html').send(html);
   });
@@ -438,6 +487,7 @@ const server = app.listen(PORT, '0.0.0.0', () => {
     console.log('[server] BMS: nie skonfigurowany — kanały baterii liczone z Growatt.');
   }
   if (options.require_auth && AUTH_TOKEN) console.log('[server] Autoryzacja: WŁĄCZONA (X-Addon-Token)');
+  else if (options.require_auth && !AUTH_TOKEN) console.error('[server] BŁĄD KONFIGURACJI: require_auth=true, ale brak ADDON_TOKEN — serwer blokuje żądania (503, fail-closed).');
   else console.warn('[server] Autoryzacja: wyłączona — dodatek dostępny dla każdego w sieci. Ustaw require_auth + ADDON_TOKEN jeśli port jest wystawiony.');
   const h = kv.health();
   if (!h.ok) console.error('[server] MAGAZYN KV USZKODZONY — kopia: ' + h.degraded.backupPath);

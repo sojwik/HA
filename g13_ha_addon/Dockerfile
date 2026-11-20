@@ -1,4 +1,6 @@
-FROM node:20-alpine
+# Przypięta gałąź 20.19 Alpine dla powtarzalnych budów. Kontener zachowuje
+# uprawnienia zgodne z wolumenem /data HA Supervisor (pliki KV mają 0o600).
+FROM node:20.19-alpine
 
 WORKDIR /app
 

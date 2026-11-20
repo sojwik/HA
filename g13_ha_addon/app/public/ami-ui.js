@@ -5,7 +5,7 @@
   if(!M||!B)return;
   const $=id=>document.getElementById(id),button=$('btnAmiFetch'),cancel=$('btnAmiCancel');
   const meter=$('amiMeter'),confirm=$('amiConfirm'),from=$('amiFrom'),status=$('amiStatus');
-  let loaded=false,active=false,controller=null,binding=null;
+  let loaded=false,active=false,controller=null,binding=null,lastAutoFrom='';
   const say=(text,kind='info')=>{status.textContent=text;status.style.color=kind==='error'?'#b91c1c':kind==='warn'?'#b45309':'';};
   async function json(url,body) {
     const response=await fetch(url,{...(body?{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)}:{}),signal:controller.signal});
@@ -45,7 +45,7 @@
       for(const g of groups){const opt=document.createElement('option');opt.value=g.meter;opt.textContent=g.label||'Licznik AMIplus';meter.appendChild(opt);}
       meter.value=selected||(binding?binding.meter:'');
       if(binding&&!groups.some(g=>g.meter===binding.meter))throw Error('Zapisany licznik AMI nie jest dostępny. Nie wybrano zastępczego; import CSV/XLSX pozostaje dostępny.');
-      if(!from.value)from.value=M.defaultFrom(context.hourly,discovered.through);
+      const autoFrom=M.defaultFrom(context.hourly,discovered.through);if(!from.value||from.value===lastAutoFrom){from.value=autoFrom;lastAutoFrom=autoFrom;}
       $('amiThrough').textContent=discovered.through+' (wczoraj, Europe/Warsaw)';from.max=discovered.through;
       $('amiSettings').hidden=false;
       if(!loaded&&!binding || !meter.value || !binding&&!confirm.checked){
@@ -83,5 +83,5 @@
     document.querySelectorAll('.tab-btn').forEach(tab=>tab.addEventListener('click',place));
     place();
   }
-  B.whenReady.then(()=>{const end=M.yesterday();from.value=M.defaultFrom(B.getSnapshot().hourlyElicznik,end);$('amiThrough').textContent=end+' (wczoraj, Europe/Warsaw)';});
+  B.whenReady.then(()=>{const end=M.yesterday(),autoFrom=M.defaultFrom(B.getSnapshot().hourlyElicznik,end);if(!from.value||from.value===lastAutoFrom){from.value=autoFrom;lastAutoFrom=autoFrom;}$('amiThrough').textContent=end+' (wczoraj, Europe/Warsaw)';});
 })();
