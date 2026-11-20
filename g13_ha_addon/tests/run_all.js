@@ -4,6 +4,7 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 
 const SUITES = [
+  ['Kalkulacje 0.4.4 (Depozyt M+1 FIFO, Wygasanie, Analiza PV)', 'test_calc_044.js'],
   ['Bezpieczeństwo 0.4.3 (auth fail-closed, CSP nonce, KV ETag, XSS)', 'test_security_043.js'],
   ['AMIplus — wspólny przycisk w karcie Rozbudowa PV', 'test_ami_pv_dom.js'],
   ['AMIplus — dane, strefy, DST i atomowy zapis', 'test_ami_core.js'],

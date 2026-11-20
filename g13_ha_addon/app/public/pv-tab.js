@@ -85,7 +85,7 @@
     wrap.append(lab, input); if (help) wrap.append(el('small', help)); return wrap;
   }
   root.innerHTML = `
-    <header class="pv-heading"><div><span class="eyebrow">Osobny kalkulator · 0.4.0 (dodatek 0.4.3)</span><h2>Rozbudowa PV</h2></div><span class="pv-badge">Symulacja scenariusza</span></header>
+    <header class="pv-heading"><div><span class="eyebrow">Osobny kalkulator · 0.4.0 (dodatek 0.4.4)</span><h2>Rozbudowa PV</h2></div><span class="pv-badge">Symulacja scenariusza</span></header>
     <div id="pvModeNotice" class="pv-notice"><strong>Nie jest to zwalidowana rekonstrukcja pomiarów.</strong> Porównujemy dwa modele: obecne PV i PV po rozbudowie — z dynamiczną obecną baterią, bez planowego ładowania z sieci. Dane historyczne i ich rozbieżności pokazujemy osobno. Nic nie trafia do salda depozytu, autokonsumpcji ani kalkulatora drugiego magazynu.</div>
     <section id="pvAmiSection" class="panel pv-section" aria-labelledby="pvAmiHeading">
       <h3 id="pvAmiHeading">Pobór i oddanie z AMIplus</h3>
