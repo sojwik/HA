@@ -91,7 +91,7 @@ function fetchStatistics(statisticIds, startDate, endDate, types) {
 
     let ws;
     try {
-      ws = new WebSocket(WS_URL);
+      ws = new WebSocket(WS_URL, { maxPayload: 16 * 1024 * 1024 });
     } catch (err) {
       reject(new Error('Nie mogę otworzyć gniazda WS (' + WS_URL + '): ' + err.message));
       return;

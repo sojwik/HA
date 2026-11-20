@@ -4,6 +4,7 @@ const { spawnSync } = require('child_process');
 const path = require('path');
 
 const SUITES = [
+  ['Bezpieczeństwo 0.4.3 (auth fail-closed, CSP nonce, KV ETag, XSS)', 'test_security_043.js'],
   ['AMIplus — wspólny przycisk w karcie Rozbudowa PV', 'test_ami_pv_dom.js'],
   ['AMIplus — dane, strefy, DST i atomowy zapis', 'test_ami_core.js'],
   ['AMIplus — protokół HA, HTTP i pełny przycisk w DOM', 'test_ami_http_dom.js'],

@@ -4,9 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Depozyt prosumencki — kalkulator G13</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- Fonty systemowe: zewnętrzne Google Fonts usunięte w 0.4.3 (były blokowane przez CSP). -->
 <!-- SheetJS vendored lokalnie: 0.18.5 z CDN miało CVE-2023-30533 (prototype
      pollution) i CVE-2024-22363 (ReDoS). Brak integrity= oznaczał, że
      podmiana pliku na CDN wstrzyknęłaby kod do aplikacji z dostępem do
@@ -286,7 +284,7 @@
         <li>Depozyt pokrywa wyłącznie „Koszt energii”. „Koszt dystrybucji” jest zawsze płatny osobno i nigdy nie rusza salda.</li>
         <li>Jeżeli koszt energii przewyższy dostępne środki, saldo spada do zera, a nadwyżka pokazuje się jako „Dopłata” — saldo nigdy nie robi się ujemne.</li>
         <li>Nie śledzimy wygasania środków transzami po 12 miesiącach (FIFO) — to uproszczenie wersji 1; liczone jest jedno saldo narastająco.</li>
-        <li>Dane zapisują się lokalnie na Twoim koncie między sesjami (rejestr miesięcy + wczytane ceny RCE). Surowe wiersze godzinowe z eLicznika nie są zapisywane — po przeładowaniu strony wystarczy dogrywać tylko nowe miesiące.</li>
+        <li>Dane zapisują się lokalnie w dodatku między sesjami (rejestr miesięcy, ceny RCE oraz godziny eLicznika i Home Assistant) — po przeładowaniu lub aktualizacji nie trzeba wgrywać plików ponownie.</li>
       </ul>
     </details>
   </section>
@@ -664,36 +662,58 @@
 // zwracanych obiektów), więc reszta aplikacji (saveState/loadState poniżej)
 // działa całkowicie bez zmian - tylko backend zmienia się z artefaktu na
 // plik JSON w /data.
-window.storage = {
-  async get(key){
-    const r = await fetch('api/kv/' + encodeURIComponent(key));
-    if (r.status === 404) return null;
-    if (!r.ok) throw new Error('storage.get HTTP ' + r.status);
-    const data = await r.json();
-    return { key: key, value: data.value, shared: false };
-  },
-  async set(key, value){
-    const r = await fetch('api/kv/' + encodeURIComponent(key), {
-      method: 'PUT',
-      headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({value: value})
-    });
-    if (!r.ok) throw new Error('storage.set HTTP ' + r.status);
-    const data = await r.json();
-    return { key: key, value: data.value, shared: false };
-  },
-  async delete(key){
-    const r = await fetch('api/kv/' + encodeURIComponent(key), { method: 'DELETE' });
-    if (!r.ok && r.status !== 404) throw new Error('storage.delete HTTP ' + r.status);
-    return { key: key, deleted: true, shared: false };
-  },
-  async list(prefix){
-    const r = await fetch('api/kv?prefix=' + encodeURIComponent(prefix || ''));
-    if (!r.ok) throw new Error('storage.list HTTP ' + r.status);
-    const data = await r.json();
-    return { keys: data.keys, prefix: prefix, shared: false };
+(function(){
+  const etags = Object.create(null);
+  function readEtag(r){
+    return (r && r.headers && typeof r.headers.get === 'function') ? (r.headers.get('ETag') || null) : null;
   }
-};
+  window.storage = {
+    getEtag(key){ return Object.prototype.hasOwnProperty.call(etags, key) ? etags[key] : null; },
+    setEtag(key, tag){ if (tag) etags[key] = tag; else delete etags[key]; },
+    async get(key){
+      const r = await fetch('api/kv/' + encodeURIComponent(key));
+      const tag = readEtag(r);
+      if (tag) etags[key] = tag;
+      if (r.status === 404) return null;
+      if (!r.ok) throw new Error('storage.get HTTP ' + r.status);
+      const data = await r.json();
+      return { key: key, value: data.value, shared: false, etag: tag };
+    },
+    async set(key, value, opts){
+      const headers = {'Content-Type':'application/json'};
+      const ifMatch = opts && opts.ifMatch;
+      if (typeof ifMatch === 'string' && ifMatch) headers['If-Match'] = ifMatch;
+      const r = await fetch('api/kv/' + encodeURIComponent(key), {
+        method: 'PUT',
+        headers: headers,
+        body: JSON.stringify({value: value})
+      });
+      const tag = readEtag(r);
+      if (r.status === 409){
+        const err = new Error('Konflikt zapisu (409) — dane zmieniono w innej karcie lub przez import AMIplus. Odśwież stronę przed kolejną zmianą.');
+        err.status = 409;
+        throw err;
+      }
+      if (!r.ok) throw new Error('storage.set HTTP ' + r.status);
+      if (tag) etags[key] = tag;
+      const data = await r.json();
+      return { key: key, value: data.value, shared: false, etag: tag };
+    },
+    async delete(key){
+      const r = await fetch('api/kv/' + encodeURIComponent(key), { method: 'DELETE' });
+      if (!r.ok && r.status !== 404) throw new Error('storage.delete HTTP ' + r.status);
+      const tag = readEtag(r);
+      if (tag) etags[key] = tag; else delete etags[key];
+      return { key: key, deleted: true, shared: false };
+    },
+    async list(prefix){
+      const r = await fetch('api/kv?prefix=' + encodeURIComponent(prefix || ''));
+      if (!r.ok) throw new Error('storage.list HTTP ' + r.status);
+      const data = await r.json();
+      return { keys: data.keys, prefix: prefix, shared: false };
+    }
+  };
+})();
 </script>
 
 <script>
@@ -1301,16 +1321,17 @@ function render(){
       const tr = document.createElement('tr');
       const warnTag = r.missingHours ? (' <span class="tag-warn" title="' + r.missingHours + ' godzin bez dopasowanej ceny RCE, pominięte w sumie">⚠ ' + r.missingHours + 'h</span>') : '';
       const manualTag = r.manual ? ' <span class="tag-manual">ręcznie</span>' : '';
+      const safeKey = V.escapeHtml(r.key);
       tr.innerHTML =
-        '<td class="col-month">' + formatMonthLabel(r.key) + manualTag + warnTag + '</td>' +
+        '<td class="col-month">' + V.escapeHtml(formatMonthLabel(r.key)) + manualTag + warnTag + '</td>' +
         '<td class="num">' + formatKwh1(r.kwh) + '</td>' +
-        '<td class="num"><input type="number" step="0.01" class="cell-input" data-key="' + r.key + '" data-field="przypis" value="' + r.przypis.toFixed(2) + '"></td>' +
-        '<td class="num"><input type="number" step="0.01" class="cell-input" data-key="' + r.key + '" data-field="kosztEnergii" value="' + r.kosztEnergii.toFixed(2) + '"></td>' +
-        '<td class="num"><input type="number" step="0.01" class="cell-input" data-key="' + r.key + '" data-field="kosztDystrybucji" value="' + r.kosztDystrybucji.toFixed(2) + '"></td>' +
+        '<td class="num"><input type="number" step="0.01" class="cell-input" data-key="' + safeKey + '" data-field="przypis" value="' + r.przypis.toFixed(2) + '"></td>' +
+        '<td class="num"><input type="number" step="0.01" class="cell-input" data-key="' + safeKey + '" data-field="kosztEnergii" value="' + r.kosztEnergii.toFixed(2) + '"></td>' +
+        '<td class="num"><input type="number" step="0.01" class="cell-input" data-key="' + safeKey + '" data-field="kosztDystrybucji" value="' + r.kosztDystrybucji.toFixed(2) + '"></td>' +
         '<td class="num">' + formatPLN(r.pokryte) + '</td>' +
         '<td class="num' + (r.doplata > 0 ? ' accent-rust' : '') + '">' + formatPLN(r.doplata) + '</td>' +
         '<td class="num accent-strong">' + formatPLN(r.saldoKoncowe) + '</td>' +
-        '<td class="col-actions"><button class="btn-del" data-key="' + r.key + '" title="Usuń miesiąc" aria-label="Usuń miesiąc ' + r.key + '">✕</button></td>';
+        '<td class="col-actions"><button class="btn-del" data-key="' + safeKey + '" title="Usuń miesiąc" aria-label="Usuń miesiąc ' + safeKey + '">✕</button></td>';
       tbody.appendChild(tr);
     });
   }
@@ -1985,7 +2006,7 @@ function renderAnaliza(){
         : !r.autoKnown ? '—' : (formatKwh1(r.autoKwh) + tag);
       const wartoscCell = (!r.autoKnown || r.autoWartosc === null) ? '—' : formatPLN(r.autoWartosc);
       return '<tr>' +
-        '<td class="col-month">' + formatMonthLabel(r.key) + '</td>' +
+        '<td class="col-month">' + V.escapeHtml(formatMonthLabel(r.key)) + '</td>' +
         '<td class="num accent-amber">' + formatPLN(r.przypis) + '</td>' +
         '<td class="num' + (isEst ? ' col-est' : '') + '">' + kwhCell + '</td>' +
         '<td class="num' + (isEst ? ' col-est' : '') + '">' + wartoscCell + '</td>' +
@@ -2092,11 +2113,11 @@ function renderWygasanie(){
     tbody.innerHTML = tranches.map(function(t){
       const wykorzystano = t.expired ? (t.initialValue - t.expiredAmount) : (t.initialValue - t.remaining);
       const statusText = t.expired
-        ? ('Wygasła ' + formatMonthLabel(t.expiryMonth))
-        : ('Aktywna, wygasa ' + formatMonthLabel(t.expiryMonth));
+        ? ('Wygasła ' + V.escapeHtml(formatMonthLabel(t.expiryMonth)))
+        : ('Aktywna, wygasa ' + V.escapeHtml(formatMonthLabel(t.expiryMonth)));
       const statusClass = t.expired ? (t.potentialRefund > 0.005 ? 'accent-rust' : '') : '';
       return '<tr>' +
-        '<td class="col-month">' + formatMonthLabel(t.origin) + '</td>' +
+        '<td class="col-month">' + V.escapeHtml(formatMonthLabel(t.origin)) + '</td>' +
         '<td class="num">' + formatPLN(t.initialValue) + '</td>' +
         '<td class="num">' + formatPLN(wykorzystano) + '</td>' +
         '<td class="' + statusClass + '">' + statusText + '</td>' +
@@ -2197,7 +2218,7 @@ function renderBmsCompare(){
       ? '<span class="tag-manual">BMS</span>'
       : '<span class="tag-warn" title="' + V.escapeHtml(d.reason || '') + '">Growatt</span>';
     html += '<tr>' +
-      '<td class="col-month">' + formatMonthLabel(mk) + '</td>' +
+      '<td class="col-month">' + V.escapeHtml(formatMonthLabel(mk)) + '</td>' +
       '<td class="num">' + formatKwh1(d.growattCharge) + '</td>' +
       '<td class="num">' + formatKwh1(d.bmsCharge) + '</td>' +
       '<td class="' + cls(d.chargeDeltaPct) + '">' + pct(d.chargeDeltaPct) + '</td>' +
@@ -2219,7 +2240,7 @@ function renderBmsCompare(){
     const notes = [];
     keys.forEach(function(mk){
       const d = check[mk];
-      if (d.reason) notes.push('<p class="hint" style="margin:.3rem 0;"><strong>' + formatMonthLabel(mk) + ':</strong> ' + V.escapeHtml(d.reason) + '</p>');
+      if (d.reason) notes.push('<p class="hint" style="margin:.3rem 0;"><strong>' + V.escapeHtml(formatMonthLabel(mk)) + ':</strong> ' + V.escapeHtml(d.reason) + '</p>');
     });
     if (gwHoursTotal > 0){
       notes.push('<p class="hint" style="margin:.3rem 0;">' + gwHoursTotal + ' godzin wzięto z Growatt, bo BMS ich nie miał. Reszta z BMS.</p>');
@@ -2459,7 +2480,7 @@ function renderMagazyn(){
   function rowHtml(m, label, isTotal){
     const tag = m.badHours || m.gapHours ? ' <span class="tag-warn">niepełny okres</span>' : '';
     return '<tr' + (isTotal ? ' style="font-weight:700;"' : '') + '>'
-      + '<td class="col-month">' + label + tag + '</td>'
+      + '<td class="col-month">' + V.escapeHtml(label) + tag + '</td>'
       + '<td class="num">' + formatKwh1(m.oldExportKwh) + ' → ' + formatKwh1(m.newExportKwh) + '</td>'
       + '<td class="num">' + formatKwh1(m.oldImportKwh) + ' → ' + formatKwh1(m.newImportKwh) + '</td>'
       + '<td class="num">' + formatKwh2(m.chargeKwh) + '</td>'
@@ -2615,7 +2636,7 @@ function renderStrefy(){
         return '<td class="num">' + formatKwh1(kwh) + '</td>';
       }).join('');
       grandCost += rowCost;
-      return '<tr><td class="col-month">' + formatMonthLabel(mk) + '</td>' + cells +
+      return '<tr><td class="col-month">' + V.escapeHtml(formatMonthLabel(mk)) + '</td>' + cells +
         (hasAnyRate ? '<td class="num accent-strong">' + formatPLN(rowCost) + '</td>' : '') + '</tr>';
     }).join('');
 
@@ -2865,16 +2886,25 @@ function selfConsumptionFor(monthKey){
   });
 }
 
-async function saveState(){
+let saveStateChain = Promise.resolve();
+async function saveStateNow(){
   if (!storageUsable()) return;
   try{ await saveHaHourly(); }catch(e){}
-  try{ await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, extraBattery: state.extraBattery, zoneRates: state.zoneRates,
-    // F36: bez tego po restarcie znikały oznaczenia „bilans niemożliwy”
-    // i tabela odrzuconych godzin, a zawyżone liczby zostawały.
-    haBatteryCheck: state.haBatteryCheck, haRejected: state.haRejected, bmsCheck: state.bmsCheck})); }
+  try{
+    const expected = typeof window.storage.getEtag === 'function' ? window.storage.getEtag('monthly-ledger') : null;
+    await window.storage.set('monthly-ledger', JSON.stringify({months: state.months, kosztInwestycji: state.kosztInwestycji, manualRatePlnKwh: state.manualRatePlnKwh, refundRate: state.refundRate, refundCapBasis: state.refundCapBasis, batCapacityKwh: state.batCapacityKwh, batEfficiency: state.batEfficiency, batCostPln: state.batCostPln, extraBattery: state.extraBattery, zoneRates: state.zoneRates,
+      // F36: bez tego po restarcie znikały oznaczenia „bilans niemożliwy”
+      // i tabela odrzuconych godzin, a zawyżone liczby zostawały.
+      haBatteryCheck: state.haBatteryCheck, haRejected: state.haRejected, bmsCheck: state.bmsCheck}), expected ? { ifMatch: expected } : undefined);
+  }
   catch(e){ log('Nie udało się zapisać rejestru miesięcy: ' + e.message, 'error'); }
   try{ await window.storage.set('rce-cache', JSON.stringify({v: RCE_CACHE_VERSION, data: state.rceHourly})); }
   catch(e){ log('Nie udało się zapisać cache cen RCE: ' + e.message, 'error'); }
+}
+function saveState(){
+  const next = saveStateChain.then(saveStateNow, saveStateNow);
+  saveStateChain = next.catch(function(){});
+  return next;
 }
 async function loadState(){
   // F39: opcje dodatku muszą zasilić walidator frontendu. Wcześniej
@@ -3020,6 +3050,7 @@ Object.defineProperty(window,'G13AmiBridge',{configurable:false,writable:false,v
     for(const key of Object.keys(state.hourlyElicznik))if(M.stable(state.hourlyElicznik[key])!==M.stable(result.hourly[key]))throw new Error('Potwierdzenie AMI zmienia stare godziny. Odśwież widok.');
     for(const key of result.added)M.validateRow(Object.assign({key:key},result.hourly[key]));
     state.hourlyElicznik=result.hourly;state.months=result.months;
+    if(result.ledgerEtag && window.storage && typeof window.storage.setEtag==='function')window.storage.setEtag('monthly-ledger',result.ledgerEtag);
     updateElicznikStatus();render();
     log('AMIplus: dodano '+result.added.length+' godzin. Istniejące godziny i koszty zachowane. Brakujące RCE pobierz osobno.','success');
     if(result.added.length && window.G13PvAmiView)window.G13PvAmiView.imported();
@@ -3087,8 +3118,8 @@ document.getElementById('cancelAddMonth').addEventListener('click', function(){
   document.getElementById('addMonthRow').hidden = true;
 });
 document.getElementById('confirmAddMonth').addEventListener('click', function(){
-  const val = document.getElementById('newMonthInput').value;
-  if (!val){ log('Wybierz miesiąc.', 'warn'); return; }
+  const val = String(document.getElementById('newMonthInput').value || '').trim();
+  if (!/^\d{4}-\d{2}$/.test(val)){ log('Wybierz poprawny miesiąc w formacie RRRR-MM.', 'warn'); return; }
   if (!state.months[val]) state.months[val] = {kosztEnergii:0, kosztDystrybucji:0, kwh:0, przypis:0, manual:true};
   document.getElementById('addMonthRow').hidden = true;
   render();
@@ -3097,6 +3128,7 @@ document.getElementById('confirmAddMonth').addEventListener('click', function(){
 
 let resetArmed = false;
 document.getElementById('btnReset').addEventListener('click', async function(e){
+  if (amiBusy || amiLegacyTasks){ log('Trwa pobieranie AMIplus lub zapis — poczekaj przed czyszczeniem danych.', 'warn'); return; }
   const btn = e.currentTarget;
   if (!resetArmed){
     resetArmed = true;
@@ -3107,19 +3139,26 @@ document.getElementById('btnReset').addEventListener('click', async function(e){
   resetArmed = false;
   btn.textContent = 'Wyczyść wszystkie dane';
   state.months = {}; state.hourlyElicznik = {}; state.rceHourly = {}; rceBuffer = {};
+  state.haHourly = {}; state.haBatteryCheck = {}; state.haRejected = {}; state.bmsCheck = {};
   if (storageUsable()){
     try{ await window.storage.delete('monthly-ledger'); } catch(err){}
     try{ await window.storage.delete('rce-cache'); } catch(err){}
-    try{
-      const l = await window.storage.list('elicznik-hourly-');
-      for (const k of ((l && l.keys) || [])){
-        try{ await window.storage.delete(k); } catch(err){}
-      }
-    } catch(err){}
+    try{ await window.storage.delete('ami-v1-meter'); } catch(err){}
+    for (const prefix of ['elicznik-hourly-', 'ha-hourly-']){
+      try{
+        const l = await window.storage.list(prefix);
+        for (const k of ((l && l.keys) || [])){
+          try{ await window.storage.delete(k); } catch(err){}
+        }
+      } catch(err){}
+    }
   }
-  updateElicznikStatus(); updateRceStatus();
-  render();
-  log('Wyczyszczono wszystkie dane.', 'warn');
+  updateElicznikStatus(); updateRceStatus(); updateGrowattStatus(); updateHaStatus();
+  render(); renderMagazyn();
+  if (window.G13PvAmiView && typeof window.G13PvAmiView.imported === 'function'){
+    try{ window.G13PvAmiView.imported(); } catch(err){}
+  }
+  log('Wyczyszczono dane głównej karty (w tym godziny HA i powiązanie licznika AMIplus). Dane karty Rozbudowa PV pozostały osobno.', 'warn');
 });
 
 /* ====================== GROWATT — AUTOMATYCZNA SYNCHRONIZACJA Z HA ====================== */

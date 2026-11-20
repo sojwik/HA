@@ -76,6 +76,6 @@ function commit(expectedRevision,meter,rows,confirmMeter=false) {
     fs.renameSync(tmp,kv.KV_FILE);
     try{const d=fs.openSync(path.dirname(kv.KV_FILE),'r');try{fs.fsyncSync(d);}finally{fs.closeSync(d);}}catch(e){/* rename zakończone */}
   }catch(e){try{fs.unlinkSync(tmp);}catch(_){}throw Error('Nie udało się zapisać danych AMIplus. Nie czyść danych; sprawdź ponownie stan.');}
-  return {added:merged.added,equal:merged.equal,conflicts:merged.conflicts,hourly:merged.grid,months:ledger.months,binding:{meter},committed:true};
+  return {added:merged.added,equal:merged.equal,conflicts:merged.conflicts,hourly:merged.grid,months:ledger.months,binding:{meter},committed:true,ledgerEtag:kv.etagOf(all['monthly-ledger'])};
 }
 module.exports={read,context,commit,updateMonths};

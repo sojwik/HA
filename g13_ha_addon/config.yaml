@@ -1,5 +1,5 @@
 name: "G13 Depozyt Prosumencki"
-version: "0.4.2"
+version: "0.4.3"
 slug: "g13_depozyt_calc"
 description: "Kalkulator depozytu prosumenckiego TAURON G13 z automatycznym pobieraniem danych Growatt z Home Assistant i walidacją fizyczną pomiarów."
 arch:
@@ -61,8 +61,9 @@ options:
   # z BMS będą oznaczane jako niemożliwe. W 0.3.0 było tu błędnie 0,94
   # (wyznaczone z niereprezentatywnej próbki 46 dób) i psuło to 7 miesięcy.
   battery_eta_dc: 0.97
-  # Włącz, jeśli port 8099 jest wystawiony poza ingress.
-  # Wymaga ustawienia zmiennej środowiskowej ADDON_TOKEN.
+  # Włącz wyłącznie za reverse proxy wstrzykującym nagłówek X-Addon-Token,
+  # jeśli port 8099 jest wystawiony poza ingress. Wymaga zmiennej środowiskowej
+  # ADDON_TOKEN (tryb fail-closed: brak tokenu przy true blokuje dostęp kodem 503).
   require_auth: false
 schema:
   growatt_entities:
