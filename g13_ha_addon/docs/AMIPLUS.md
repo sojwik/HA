@@ -1,4 +1,4 @@
-# AMIplus — wspólny przycisk eLicznika i Rozbudowy PV (0.4.3)
+# AMIplus — wspólny przycisk eLicznika i Rozbudowy PV (0.4.4)
 
 ## Co robi przycisk
 
@@ -68,3 +68,10 @@ Operacje PV i AMI mają wspólną blokadę w czasie importu. Rozpoczęty odczyt/
 - **Magazyn KV i współbieżność:** walidacja nazw kluczy (blokada `__proto__`, `..`, znaków specjalnych), mapa o prototypie `null`, limity rozmiaru zapisu (32 MB / 500 kluczy), losowe pliki tymczasowe `wx` z prawami `0o600`, limit `maxPayload` (16 MB) w `ha-ws.js` oraz optymistyczna kontrola `ETag` / `If-Match` (`409 Conflict`) dla `monthly-ledger` z synchronizacją po imporcie AMIplus.
 - **Pełne czyszczenie w `btnReset`:** przycisk czyszczenia głównej karty usuwa teraz także `ha-hourly-*` oraz powiązanie `ami-v1-meter` (z zachowaniem danych karty Rozbudowa PV) i jest chroniony przed równoległym importem AMI.
 - **Zachowanie danych przy aktualizacji:** format `/data/kv-store.json` oraz wszystkie klucze historii, cen RCE, AMIplus i PV są w 100% zachowane bez migracji niszczących.
+
+## Poprawki kalkulacji i zakładki Wygasanie (0.4.4)
+
+- **Zakładka Depozyt (spójność z TAURON i Wygasaniem):** `computeLedgerFromState()` stosuje ustawowy model **M+1 FIFO** z wygasaniem po 12 miesiącach (M+13) — przypis za miesiąc M zasila konto dopiero od M+1, więc nie pokrywa kosztu energii tego samego miesiąca M. Saldo w Depozycie jest w pełni spójne z sumą aktywnych transz w Wygasaniu.
+- **Zakładka Wygasanie — status „Wykorzystana” i „Potencjalny zwrot”:** transza zużyta w całości (`remaining <= 0,005 zł`) zmienia status na **„Wykorzystana”** (zamiast mylącego „Aktywna, wygasa…”) i nie pojawia się jako najbliższe wygaśnięcie z `0,00 zł`. Dla aktywnych transz z pozostałym saldem kolumna **„Potencjalny zwrot”** wylicza na żywo prognozę `do X,XX zł` (według bieżącej stawki `[%]` i podstawy limitu `przed ×1,23` / `po ×1,23`), a stopka tabeli podsumowuje wszystkie kolumny.
+- **Zakładka Analiza (ROI) — kontrola pokrycia PV:** `selfConsumptionFor()` sprawdza pokrycie godzin pomiaru produkcji PV (`haPvHours / haHours >= 90%`, tak samo jak F48 w Magazynie), zapobiegając fałszywej ujemnej autokonsumpcji w miesiącach z niepełnym pomiarem Growatt (np. przy działającym BMS). Usunięto również zdublowany fragment opisu w panelu kosztu inwestycji.
+- **Ręczny import CSV RCE:** `parseRceRows()` rozpoznaje kolumny `period` i `dtime` (koniec kwadransa z PSE) i używa `V.rceHourFromRecord()`, zachowując zgodność ze starszymi plikami godzinowymi.

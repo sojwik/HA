@@ -125,6 +125,7 @@
   td.num{font-family:'IBM Plex Mono',monospace; font-variant-numeric:tabular-nums;}
   .accent-amber{color:var(--amber-strong);}
   .accent-rust{color:var(--rust); font-weight:600;}
+  .accent-teal{color:var(--teal); font-weight:600;}
   .accent-strong{font-weight:700; color:var(--text);}
   .tag-manual{font-size:.68rem; color:var(--teal); border:1px solid var(--teal); border-radius:4px; padding:0 .3rem; margin-left:.4rem;}
   .tag-warn{font-size:.68rem; color:var(--amber-strong); margin-left:.4rem; cursor:help;}
@@ -283,7 +284,7 @@
         <li>Wartość oddania liczona jako: Oddanie_po_zbilansowaniu [kWh] × MAX(0, RCE [PLN/MWh])/1000 × 1,23 — ujemna cena RCE nigdy nie pomniejsza depozytu (art. 40 ustawy o OZE).</li>
         <li>Depozyt pokrywa wyłącznie „Koszt energii”. „Koszt dystrybucji” jest zawsze płatny osobno i nigdy nie rusza salda.</li>
         <li>Jeżeli koszt energii przewyższy dostępne środki, saldo spada do zera, a nadwyżka pokazuje się jako „Dopłata” — saldo nigdy nie robi się ujemne.</li>
-        <li>Nie śledzimy wygasania środków transzami po 12 miesiącach (FIFO) — to uproszczenie wersji 1; liczone jest jedno saldo narastająco.</li>
+        <li>Przypis za miesiąc M zasila konto depozytu od miesiąca M+1 (art. 4c ust. 4 ustawy o OZE) i jest ważny przez 12 miesięcy (M+1…M+12, wygasa na początku M+13). Rozliczenie zużycia działa metodą FIFO — spójnie z tabelą TAURON i zakładką „Wygasanie”.</li>
         <li>Dane zapisują się lokalnie w dodatku między sesjami (rejestr miesięcy, ceny RCE oraz godziny eLicznika i Home Assistant) — po przeładowaniu lub aktualizacji nie trzeba wgrywać plików ponownie.</li>
       </ul>
     </details>
@@ -355,7 +356,7 @@
   <section class="panel" style="margin-bottom:1.25rem;">
     <h2>Koszt inwestycji (PV + magazyn)</h2>
     <p class="hint"><strong>Wpisz tu koszt CAŁEJ instalacji: PV plus magazyn.</strong> Korzyść w tej zakładce (depozyt + autokonsumpcja) jest mierzona na danych, w których magazyn już pracuje — obniża on oddanie do sieci, więc podnosi autokonsumpcję. Licznik zawiera już efekt magazynu, więc mianownik też musi go obejmować. Zwrot samego magazynu liczony jest osobno w zakładce „Magazyn", z pola „Koszt magazynu". <strong>Nie dodawaj tych dwóch zwrotów do siebie</strong> — zysk magazynu jest składnikiem tej zakładki, nie osobną pozycją.</p>
-    <p class="hint">„Zwrot” liczony jest jako suma przypisów do depozytu (wartość energii oddanej do sieci) narastająco w czasie „Zwrot” liczony jest jako suma przypisów do depozytu (wartość energii oddanej do sieci) narastająco w czasie — niezależnie czy dana kwota została już wykorzystana na fakturę czy zostaje jako saldo, bo to i tak realna korzyść finansowa z instalacji.</p>
+    <p class="hint">„Zwrot” liczony jest jako suma przypisów do depozytu (wartość energii oddanej do sieci) oraz wartości autokonsumpcji narastająco w czasie — niezależnie czy dana kwota została już wykorzystana na fakturę czy zostaje jako saldo, bo to i tak realna korzyść finansowa z instalacji.</p>
     <div class="roi-input-row">
       <label for="inputKosztInwestycji">Koszt PV + magazyn [PLN]</label>
       <input type="number" id="inputKosztInwestycji" step="0.01" min="0" placeholder="np. 26000 (PV 21000 + magazyn 5000)">
@@ -436,15 +437,16 @@
           </tr>
         </thead>
         <tbody id="tranchesBody"></tbody>
+        <tfoot id="tranchesFoot"></tfoot>
       </table>
     </div>
     <details class="assumptions">
       <summary>Założenia (rozwiń)</summary>
       <ul>
-        <li>Każdy miesięczny przypis do depozytu to osobna transza, ważna 12 miesięcy od miesiąca powstania (uproszczenie: liczymy w pełnych miesiącach, nie dniach).</li>
-        <li>Zużycie kosztu energii rozlicza się metodą FIFO — najpierw z najstarszej dostępnej, jeszcze niewygasłej transzy.</li>
-        <li>Potencjalny zwrot = MIN(to, co faktycznie zostało niewykorzystane w transzy, stawka zwrotu × wartość początkowa transzy) — nie dostaniesz więcej niż faktycznie zostało, nawet jeśli stawka pozwalałaby na więcej.</li>
-        <li>To licznik informacyjny — sam zwrot wymaga wniosku do sprzedawcy, aplikacja go nie składa automatycznie.</li>
+        <li>Każdy miesięczny przypis z miesiąca M zasila konto w miesiącu następnym (M+1) i jest ważny 12 miesięcy od przypisania (M+1…M+12; wygasa na początku M+13).</li>
+        <li>Zużycie kosztu energii rozlicza się metodą FIFO — najpierw z najstarszej dostępnej, jeszcze niewygasłej transzy. Transza w pełni zużyta otrzymuje status „Wykorzystana” i nie wchodzi do najbliższego wygaśnięcia.</li>
+        <li>Kolumna „Potencjalny zwrot” pokazuje: dla transz wykorzystanych 0,00 zł, dla wygasłych należny zwrot, a dla aktywnych prognozę „do X zł” (gdyby obecna pozostałość nie została wykorzystana przed wygaśnięciem) = MIN(pozostałość transzy, stawka zwrotu × podstawa limitu).</li>
+        <li>To licznik informacyjny — sam zwrot wymaga rozliczenia przez sprzedawcę, aplikacja nie składa wniosku automatycznie.</li>
       </ul>
     </details>
   </section>
@@ -1063,8 +1065,10 @@ async function handleElicznikFiles(fileList){
 
 /* ============================== RCE CSV PARSING ============================== */
 function classifyRceColumn(norm){
-  if (norm.indexOf('data') !== -1) return 'date';
-  if (norm.indexOf('godzin') !== -1 || norm.indexOf('czas') !== -1 || norm.indexOf('dtime') !== -1 || norm.indexOf('okres') !== -1) return 'hour';
+  if (norm === 'period' || norm.indexOf('okres') !== -1) return 'period';
+  if (norm === 'dtime' || norm.indexOf('udtczas') !== -1) return 'dtime';
+  if (norm.indexOf('businessdate') !== -1 || norm.indexOf('data') !== -1) return 'date';
+  if (norm.indexOf('godzin') !== -1 || norm.indexOf('czas') !== -1) return 'hour';
   if (norm.indexOf('rce') !== -1 || norm.indexOf('cena') !== -1) return 'price';
   return null;
 }
@@ -1086,23 +1090,38 @@ function parseRceRows(rows, sourceLabel){
   const out = [];
   let lastDate = null;
   const rawHourObjs = [];
+  const hasPseIntervalCol = colMap.period !== undefined || colMap.dtime !== undefined;
   for (let i = headerRowIdx + 1; i < rows.length; i++){
     const row = rows[i];
     if (!row || row.every(function(c){ return c === '' || c === undefined || c === null; })) continue;
     let dateStr = colMap.date !== undefined ? parseDateFlexible(row[colMap.date]) : null;
+    if (!dateStr && colMap.dtime !== undefined) dateStr = parseDateFlexible(row[colMap.dtime]);
     if (!dateStr) dateStr = lastDate;
     if (!dateStr) continue;
     lastDate = dateStr;
+    const price = parsePlNumber(row[colMap.price]);
+    if (isNaN(price)) continue;
+    if (hasPseIntervalCol){
+      const rec = {};
+      if (colMap.period !== undefined) rec.period = row[colMap.period];
+      if (colMap.dtime !== undefined) rec.dtime = row[colMap.dtime];
+      const h = V.rceHourFromRecord(rec);
+      if (h !== null && h >= 0 && h <= 23){
+        out.push({date:dateStr, resolvedHour:h, price:price});
+        continue;
+      }
+    }
     let hourObj = colMap.hour !== undefined ? extractHour(row[colMap.hour]) : (colMap.date !== undefined ? extractHour(row[colMap.date]) : null);
     if (!hourObj) continue;
     rawHourObjs.push(hourObj);
-    const price = parsePlNumber(row[colMap.price]);
-    if (isNaN(price)) continue;
     out.push({date:dateStr, rawHour:hourObj, price:price});
   }
   const offset = detectHourOffset(rawHourObjs);
   if (offset) log(sourceLabel + ': godziny numerowane 1–24 — przesuwam do 0–23.', 'debug');
-  return out.map(function(r){ return {date:r.date, hour:r.rawHour.value - offset, price:r.price}; });
+  return out.map(function(r){
+    const h = r.resolvedHour !== undefined ? r.resolvedHour : (r.rawHour.value - offset);
+    return {date:r.date, hour:h, price:r.price};
+  }).filter(function(r){ return r.hour >= 0 && r.hour <= 23; });
 }
 
 function addRceRecord(date, hour, price){
@@ -1270,24 +1289,57 @@ function recomputeMonths(){
 }
 
 function computeLedgerFromState(){
+  // 0.4.4: rozliczenie M+1 FIFO z wygasaniem w M+13 (art. 4c ust. 4 ustawy o OZE),
+  // spójne z tabelą TAURON i zakładką „Wygasanie”. Przypis za miesiąc M zasila
+  // saldo na koniec M i pokrywa koszty dopiero od miesiąca M+1.
   const keys = Object.keys(state.months).sort();
-  let saldo = 0;
+  const EPS = 0.005;
+  const tranches = [];
   const rows = [];
   for (const key of keys){
+    let wygaslo = 0;
+    for (const t of tranches){
+      if (!t.expired && !t.utilized && t.expiryMonth <= key){
+        if (t.remaining <= EPS){ t.remaining = 0; t.utilized = true; }
+        else { wygaslo += t.remaining; t.remaining = 0; t.expired = true; }
+      }
+    }
+    wygaslo = round2(wygaslo);
     const m = state.months[key];
     const przypis = m.przypis || 0;
     const kosztEnergii = m.kosztEnergii || 0;
     const kosztDystrybucji = m.kosztDystrybucji || 0;
-    const dostepne = saldo + przypis;
-    const pokryte = Math.min(dostepne, kosztEnergii);
-    const doplata = Math.max(0, kosztEnergii - dostepne);
-    const saldoKoncowe = dostepne - pokryte;
+    let need = kosztEnergii;
+    let pokryte = 0;
+    for (const t of tranches){
+      if (need <= 0) break;
+      if (t.expired || t.utilized || t.assignedMonth > key || t.remaining <= 0) continue;
+      const used = Math.min(need, t.remaining);
+      t.remaining = round2(t.remaining - used);
+      if (t.remaining <= EPS){ t.remaining = 0; t.utilized = true; }
+      pokryte += used;
+      need -= used;
+    }
+    pokryte = round2(pokryte);
+    const doplata = round2(Math.max(0, kosztEnergii - pokryte));
+    if (przypis > 0){
+      tranches.push({
+        origin: key,
+        assignedMonth: addMonths(key, 1),
+        expiryMonth: addMonths(key, 13),
+        remaining: round2(przypis),
+        expired: false,
+        utilized: false,
+      });
+    }
+    const saldoKoncowe = round2(tranches.reduce(function(acc, t){
+      return acc + (!t.expired && !t.utilized ? t.remaining : 0);
+    }, 0));
     rows.push({
       key: key, kwh: m.kwh || 0, przypis: przypis, kosztEnergii: kosztEnergii, kosztDystrybucji: kosztDystrybucji,
-      pokryte: pokryte, doplata: doplata, saldoKoncowe: saldoKoncowe,
+      pokryte: pokryte, doplata: doplata, wygaslo: wygaslo, saldoKoncowe: saldoKoncowe,
       missingHours: m.missingHours || 0, manual: !!m.manual
     });
-    saldo = saldoKoncowe;
   }
   return rows;
 }
@@ -1320,10 +1372,11 @@ function render(){
     rows.forEach(function(r){
       const tr = document.createElement('tr');
       const warnTag = r.missingHours ? (' <span class="tag-warn" title="' + r.missingHours + ' godzin bez dopasowanej ceny RCE, pominięte w sumie">⚠ ' + r.missingHours + 'h</span>') : '';
+      const expTag = r.wygaslo > 0.005 ? (' <span class="tag-warn" title="W tym miesiącu wygasły niewykorzystane środki sprzed 12 miesięcy">wygasło ' + formatPLN(r.wygaslo) + '</span>') : '';
       const manualTag = r.manual ? ' <span class="tag-manual">ręcznie</span>' : '';
       const safeKey = V.escapeHtml(r.key);
       tr.innerHTML =
-        '<td class="col-month">' + V.escapeHtml(formatMonthLabel(r.key)) + manualTag + warnTag + '</td>' +
+        '<td class="col-month">' + V.escapeHtml(formatMonthLabel(r.key)) + manualTag + warnTag + expTag + '</td>' +
         '<td class="num">' + formatKwh1(r.kwh) + '</td>' +
         '<td class="num"><input type="number" step="0.01" class="cell-input" data-key="' + safeKey + '" data-field="przypis" value="' + r.przypis.toFixed(2) + '"></td>' +
         '<td class="num"><input type="number" step="0.01" class="cell-input" data-key="' + safeKey + '" data-field="kosztEnergii" value="' + r.kosztEnergii.toFixed(2) + '"></td>' +
@@ -1934,10 +1987,18 @@ function renderAnaliza(){
      * Dopiero gdy jej nie ma, spadamy do starych gałęzi — i wtedy są one
      * oznaczone jako mniej dokładne. */
     const sc = selfConsumptionFor(key);
-    if (sc && sc.priced){
+    if (sc && sc.priced && sc.kwh >= 0){
       autoKwh = sc.kwh;
       tier = 'strefy';
       autoPlnOverride = sc.pln;
+    } else if (sc && sc.pvIncomplete && !hasPrecise){
+      autoKwh = null;
+      tier = 'brak_pv';
+      autoWarning = sc.reason;
+    } else if (sc && sc.priced && sc.kwh < 0 && !hasPrecise){
+      autoKwh = null;
+      tier = 'brak_pv';
+      autoWarning = 'ujemny wynik autokonsumpcji (' + formatKwh1(sc.kwh) + ' kWh) — niepełne lub niespójne pomiary produkcji PV w HA';
     } else if (hasHa){
       // D1: było Math.max(0, …) z tier='ha' ustawionym z góry → gdy licznik
       // poboru eksplodował (lipiec: 3019,7 kWh wobec 38,4 z TAURONa),
@@ -1974,7 +2035,7 @@ function renderAnaliza(){
       autoKwh = m.autokonsumpcjaEstKwh || 0;
       tier = 'szacunek';
     }
-    const autoKnown = (tier !== 'blad') && (hasHa || hasPrecise || (m.nightRate !== null && m.nightRate !== undefined));
+    const autoKnown = (tier !== 'blad' && tier !== 'brak_pv') && (hasHa || hasPrecise || (m.nightRate !== null && m.nightRate !== undefined));
     // Uśredniona efektywna stawka PLN/kWh (własna miesiąca, inaczej uśredniona z całych danych, inaczej ręczna zapasowa)
     // — ta sama funkcja co w Magazynie/Strefach, żeby stawka nigdy nie rozjechała się między zakładkami.
     const rateUsed = resolveEffectiveRate(key);
@@ -1994,6 +2055,8 @@ function renderAnaliza(){
       const pct = koszt > 0 ? Math.min(100, (r.cum / koszt * 100)) : null;
       const tag = r.tier === 'blad'
         ? ' <span class="tag-warn" style="background:#7f1d1d;color:#fff;" title="' + V.escapeHtml(r.autoWarning || 'błąd danych') + '">BŁĄD DANYCH</span>'
+        : r.tier === 'brak_pv'
+        ? ' <span class="tag-warn" title="' + V.escapeHtml(r.autoWarning || 'brak pełnych danych PV') + '">brak danych PV</span>'
         : r.autoWarning
         ? ' <span class="tag-warn" title="' + V.escapeHtml(r.autoWarning) + '">sprawdź</span>'
         : r.tier === 'strefy' ? ' <span class="tag-manual" title="Godzina po godzinie: produkcja + rozładowanie − ładowanie − eksport z eLicznika, wycenione po strefie danej godziny">strefowe</span>'
@@ -2003,6 +2066,7 @@ function renderAnaliza(){
       const isEst = r.tier === 'szacunek';
       const kwhCell = (r.tier === 'blad')
         ? ('<span style="color:#f87171;" title="' + V.escapeHtml(r.autoWarning || '') + '">licznik HA uszkodzony</span>' + tag)
+        : (r.tier === 'brak_pv') ? ('—' + tag)
         : !r.autoKnown ? '—' : (formatKwh1(r.autoKwh) + tag);
       const wartoscCell = (!r.autoKnown || r.autoWartosc === null) ? '—' : formatPLN(r.autoWartosc);
       return '<tr>' +
@@ -2056,28 +2120,34 @@ function addMonths(monthKey, n){
 function computeTranches(){
   const keys = Object.keys(state.months).sort();
   const refundRate = (state.refundRate !== undefined && state.refundRate !== null) ? state.refundRate : 0.30;
+  const basis = state.refundCapBasis || 'base';
+  const EPS = 0.005;
   const tranches = keys.filter(function(k){ return (state.months[k].przypis||0) > 0; }).map(function(k){
     // art. 4c ust. 4: wartość ×1,23 jest przypisywana w MIESIĄCU NASTĘPNYM
     // po wprowadzeniu energii. Transza żyje 12 miesięcy OD PRZYPISANIA,
     // czyli od M+1 do M+12 włącznie → wygasa na początku M+13.
-    // Było addMonths(k,12), co skracało życie transzy o miesiąc.
     const assignedMonth = addMonths(k, 1);
+    const init = round2(state.months[k].przypis);
     return { origin:k, assignedMonth:assignedMonth,
-      initialValue:state.months[k].przypis, remaining:state.months[k].przypis,
-      expiryMonth: addMonths(k,13), expired:false, expiredAmount:0, potentialRefund:0 };
+      initialValue:init, remaining:init,
+      expiryMonth: addMonths(k,13), expired:false, utilized:false,
+      expiredAmount:0, potentialRefund:0, projectedRefund:0,
+      refundCap:0, refundCapBase:0, writtenOff:0, projectedWrittenOff:0 };
   });
 
   function expireIfDue(cutoffMonth){
     tranches.forEach(function(t){
-      if (!t.expired && t.expiryMonth <= cutoffMonth){
-        t.expiredAmount = t.remaining;
+      if (!t.expired && !t.utilized && t.expiryMonth <= cutoffMonth){
+        if (t.remaining <= EPS){
+          t.remaining = 0;
+          t.utilized = true;
+          return;
+        }
+        t.expiredAmount = round2(t.remaining);
         // art. 4 ust. 11a pkt 2: limit to 30% wartości energii wprowadzonej
         // w miesiącu, KTÓREGO DOTYCZY ZWROT — czyli miesiąca pochodzenia
         // transzy, nie całego salda i nie miesiąca wypłaty.
-        // Podstawa (przed czy po ×1,23) jest konfigurowalna, bo przepis
-        // i praktyka sprzedawców się tu rozjeżdżają o 23%.
-        const cap = V.refundCap(t.remaining, t.initialValue, refundRate,
-                                state.refundCapBasis || 'base', t.origin);
+        const cap = V.refundCap(t.remaining, t.initialValue, refundRate, basis, t.origin);
         t.potentialRefund = cap.refund;
         t.refundCap = cap.cap;
         t.refundCapBase = cap.capBase;
@@ -2093,40 +2163,108 @@ function computeTranches(){
     let need = state.months[m].kosztEnergii || 0;
     for (const t of tranches){
       if (need <= 0) break;
-      if (t.expired || t.assignedMonth > m || t.remaining <= 0) continue;
+      if (t.expired || t.utilized || t.assignedMonth > m || t.remaining <= 0) continue;
       const used = Math.min(need, t.remaining);
-      t.remaining -= used;
+      t.remaining = round2(t.remaining - used);
+      if (t.remaining <= EPS){
+        t.remaining = 0;
+        t.utilized = true;
+      }
       need -= used;
     }
   }
   const todayMonth = new Date().toISOString().slice(0,7);
   expireIfDue(todayMonth);
+
+  // 0.4.4: dla aktywnych transz z pozostałym saldem wyliczamy prognozowany
+  // potencjalny zwrot (gdyby pozostałe środki nie zostały wykorzystane do wygaśnięcia).
+  tranches.forEach(function(t){
+    if (!t.expired){
+      if (t.remaining <= EPS){
+        t.remaining = 0;
+        t.utilized = true;
+        t.projectedRefund = 0;
+        t.projectedWrittenOff = 0;
+      } else {
+        const cap = V.refundCap(t.remaining, t.initialValue, refundRate, basis, t.origin);
+        t.projectedRefund = cap.refund;
+        t.refundCap = cap.cap;
+        t.refundCapBase = cap.capBase;
+        t.projectedWrittenOff = cap.writtenOff;
+      }
+    }
+  });
   return tranches;
 }
 
 function renderWygasanie(){
   const tranches = computeTranches();
   const tbody = document.getElementById('tranchesBody');
+  const tfoot = document.getElementById('tranchesFoot');
   if (!tranches.length){
     tbody.innerHTML = '<tr><td colspan="5" class="empty-state">Brak danych — wgraj pliki w zakładce Depozyt.</td></tr>';
+    if (tfoot) tfoot.innerHTML = '';
   } else {
+    let sumInit = 0, sumUsed = 0, sumRemaining = 0, sumExpiredRefund = 0, sumProjectedRefund = 0;
     tbody.innerHTML = tranches.map(function(t){
-      const wykorzystano = t.expired ? (t.initialValue - t.expiredAmount) : (t.initialValue - t.remaining);
-      const statusText = t.expired
-        ? ('Wygasła ' + V.escapeHtml(formatMonthLabel(t.expiryMonth)))
-        : ('Aktywna, wygasa ' + V.escapeHtml(formatMonthLabel(t.expiryMonth)));
-      const statusClass = t.expired ? (t.potentialRefund > 0.005 ? 'accent-rust' : '') : '';
+      const wykorzystano = round2(t.expired ? (t.initialValue - t.expiredAmount) : (t.initialValue - t.remaining));
+      sumInit += t.initialValue;
+      sumUsed += wykorzystano;
+      if (!t.expired && !t.utilized) sumRemaining += t.remaining;
+      sumExpiredRefund += t.potentialRefund;
+      sumProjectedRefund += t.projectedRefund;
+
+      let statusText, statusClass = '', refundCell, refundClass = 'num', refundTitle = '';
+      if (t.expired){
+        statusText = 'Wygasła ' + V.escapeHtml(formatMonthLabel(t.expiryMonth));
+        statusClass = t.potentialRefund > 0.005 ? 'accent-rust' : '';
+        refundCell = formatPLN(t.potentialRefund);
+        if (t.potentialRefund > 0.005) refundClass += ' accent-rust';
+        refundTitle = 'Wygasło ' + formatPLN(t.expiredAmount) + '; zwrot ' + formatPLN(t.potentialRefund)
+          + ' (limit z ' + formatPLN(t.refundCapBase) + '), umorzenie ' + formatPLN(t.writtenOff);
+      } else if (t.utilized){
+        statusText = 'Wykorzystana';
+        statusClass = 'accent-teal';
+        refundCell = formatPLN(0);
+        refundTitle = 'Transza została w całości wykorzystana na faktury energii';
+      } else {
+        const remNote = wykorzystano > 0.005 ? (' (zostało ' + formatPLN(t.remaining) + ')') : '';
+        statusText = 'Aktywna' + remNote + ', wygasa ' + V.escapeHtml(formatMonthLabel(t.expiryMonth));
+        refundCell = 'do ' + formatPLN(t.projectedRefund);
+        if (t.projectedRefund > 0.005) refundClass += ' accent-amber';
+        refundTitle = 'Gdyby pozostałe ' + formatPLN(t.remaining) + ' nie zostało wykorzystane do '
+          + formatMonthLabel(t.expiryMonth) + ': zwrot maks. ' + formatPLN(t.projectedRefund)
+          + ' (limit z ' + formatPLN(t.refundCapBase) + '), umorzenie ' + formatPLN(t.projectedWrittenOff);
+      }
       return '<tr>' +
         '<td class="col-month">' + V.escapeHtml(formatMonthLabel(t.origin)) + '</td>' +
         '<td class="num">' + formatPLN(t.initialValue) + '</td>' +
         '<td class="num">' + formatPLN(wykorzystano) + '</td>' +
         '<td class="' + statusClass + '">' + statusText + '</td>' +
-        '<td class="num' + (t.potentialRefund > 0.005 ? ' accent-rust' : '') + '">' + (t.expired ? formatPLN(t.potentialRefund) : '—') + '</td>' +
+        '<td class="' + refundClass + '" title="' + V.escapeHtml(refundTitle) + '">' + refundCell + '</td>' +
       '</tr>';
     }).join('');
+
+    if (tfoot){
+      const footRefund = sumExpiredRefund > 0.005 && sumProjectedRefund > 0.005
+        ? (formatPLN(sumExpiredRefund) + ' + do ' + formatPLN(sumProjectedRefund))
+        : sumExpiredRefund > 0.005
+        ? formatPLN(sumExpiredRefund)
+        : sumProjectedRefund > 0.005
+        ? ('do ' + formatPLN(sumProjectedRefund))
+        : formatPLN(0);
+      tfoot.innerHTML = '<tr><td>SUMA</td>' +
+        '<td class="num">' + formatPLN(round2(sumInit)) + '</td>' +
+        '<td class="num">' + formatPLN(round2(sumUsed)) + '</td>' +
+        '<td>Pozostało aktywne: <strong>' + formatPLN(round2(sumRemaining)) + '</strong></td>' +
+        '<td class="num accent-amber">' + footRefund + '</td></tr>';
+    }
   }
 
-  const active = tranches.filter(function(t){ return !t.expired; }).sort(function(a,b){ return a.expiryMonth.localeCompare(b.expiryMonth); });
+  // Wyłącznie aktywne transze z realną pozostałością (> 0,005 zł) — wykorzystane w całości nie wygasają.
+  const active = tranches
+    .filter(function(t){ return !t.expired && !t.utilized && t.remaining > 0.005; })
+    .sort(function(a,b){ return a.expiryMonth.localeCompare(b.expiryMonth); });
   const readoutEl = document.getElementById('readoutWygasanie');
   const subEl = document.getElementById('readoutWygasanieSub');
   if (!tranches.length){
@@ -2138,12 +2276,13 @@ function renderWygasanie(){
   } else {
     const nearest = active[0];
     readoutEl.textContent = formatMonthLabel(nearest.expiryMonth);
-    subEl.textContent = formatPLN(nearest.remaining) + ' z transzy ' + formatMonthLabel(nearest.origin) + ' — jeśli zostanie niewykorzystane';
+    subEl.textContent = formatPLN(nearest.remaining) + ' z transzy ' + formatMonthLabel(nearest.origin)
+      + ' — jeśli zostanie niewykorzystane (potencjalny zwrot: do ' + formatPLN(nearest.projectedRefund) + ')';
   }
 
-  const totalRefund = tranches.reduce(function(a,t){ return a + t.potentialRefund; }, 0);
-  if (totalRefund > 0.005){
-    subEl.textContent += ' · łączny potencjalny zwrot z już wygasłych transz: ' + formatPLN(totalRefund);
+  const totalExpiredRefund = tranches.reduce(function(a,t){ return a + t.potentialRefund; }, 0);
+  if (totalExpiredRefund > 0.005){
+    subEl.textContent += ' · łączny potencjalny zwrot z już wygasłych transz: ' + formatPLN(totalExpiredRefund);
   }
 }
 
@@ -2853,6 +2992,17 @@ function batteryEconomicsFor(monthKey){
 function selfConsumptionFor(monthKey){
   const rows = state.haHourly[monthKey];
   if (!rows || !rows.length) return null;
+  const m = state.months[monthKey] || {};
+  // F48/0.4.4: przy niepełnych danych PV z Growatt (np. 28 z 351 h przy działającym BMS)
+  // brak pomiaru produkcji wygląda jak pv=0 i po odjęciu eksportu eLicznika daje ujemną autokonsumpcję.
+  if (typeof m.haPvHours === 'number' && rows.length > 0 && (m.haPvHours / rows.length) < 0.90){
+    return {
+      hours: rows.length, kwh: null, pln: null, exportKwh: 0, zoneCoverage: 0,
+      priced: false, pvIncomplete: true,
+      reason: 'brak pełnego pomiaru produkcji PV (' + m.haPvHours + ' z ' + rows.length
+        + ' h) — nie można wyliczyć autokonsumpcji z HA (wgraj raport miesięczny Growatt albo pomiń miesiąc)',
+    };
+  }
   const hours = rows.map(function(h){
     const lab = V.localHourLabel(h.ts);
     return {date:lab.date, hour:lab.hour, produkcja:h.produkcja,
